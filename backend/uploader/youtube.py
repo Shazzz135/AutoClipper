@@ -61,31 +61,102 @@ class YouTubeUploader:
         self._service = None
         return self.get_service()
 
+    def get_streamer_for_account(self, account_id: str) -> str:
+        """
+        Maps a YouTube account ID (e.g. 'KaiClips', 'JynxziClips135') to its tracked Twitch streamer.
+        """
+        import re
+        clean = account_id.lower().strip()
+        profiles_file = settings.BASE_DIR / "config" / "streamer_profiles.json"
+        if profiles_file.exists():
+            try:
+                data = json.loads(profiles_file.read_text())
+                custom_map = data.get("_yt_account_map", {})
+                if clean in custom_map and custom_map[clean]:
+                    return custom_map[clean]
+            except Exception:
+                pass
+
+        if "kai" in clean:
+            return "kaicenat"
+        if "jynxzi" in clean:
+            return "jynxzi"
+        if "speed" in clean:
+            return "ishowspeed"
+        if "caseoh" in clean:
+            return "caseoh"
+        if "xqc" in clean:
+            return "xqc"
+        if "plaqueboymax" in clean:
+            return "plaqueboymax"
+        if "stableronaldo" in clean or "ronaldo" in clean:
+            return "stableronaldo"
+        if "jasontheween" in clean:
+            return "jasontheween"
+        if "lacy" in clean:
+            return "lacy"
+
+        inferred = re.sub(r'(clips|clip|shorts|short|_\d+|\d+|_)', '', clean).strip()
+        return inferred or settings.TWITCH_CHANNEL
+
+    def detect_active_account(self) -> Optional[str]:
+        """
+        Checks config/token.json against config/tokens/*.json to identify the active YouTube account.
+        """
+        tokens_dir = settings.BASE_DIR / "config" / "tokens"
+        tokens_dir.mkdir(parents=True, exist_ok=True)
+        if not self.token_path.exists():
+            return None
+
+        try:
+            active_data = json.loads(self.token_path.read_text())
+            active_rt = active_data.get("refresh_token")
+        except Exception:
+            active_rt = None
+
+        for f in sorted(tokens_dir.glob("*.json")):
+            try:
+                data = json.loads(f.read_text())
+                if active_rt and data.get("refresh_token") == active_rt:
+                    state.youtube_channel = f.stem
+                    return f.stem
+            except Exception:
+                pass
+
+        return None
+
     def get_available_accounts(self) -> list:
         """
         Lists all saved YouTube channel tokens from config/tokens/
         """
-        import shutil
         tokens_dir = settings.BASE_DIR / "config" / "tokens"
         tokens_dir.mkdir(parents=True, exist_ok=True)
 
-        current_token_path = settings.BASE_DIR / settings.YOUTUBE_TOKEN_PATH
-        token_files = list(tokens_dir.glob("*.json"))
+        token_files = sorted(list(tokens_dir.glob("*.json")))
+        detected_id = self.detect_active_account()
+        active_channel = detected_id or getattr(state, "youtube_channel", "") or "CONNECTED"
 
-        active_channel = getattr(state, "youtube_channel", "") or "CONNECTED"
         accounts = []
-
         for f in token_files:
             account_id = f.stem
             display_name = account_id.replace("_", " ")
-            is_active = (account_id.lower() == active_channel.replace(" ", "").lower()) or (display_name.lower() == active_channel.lower())
+            streamer = self.get_streamer_for_account(account_id)
+            is_active = (
+                account_id.lower() == active_channel.replace(" ", "").lower()
+                or display_name.lower() == active_channel.lower()
+            )
 
             accounts.append({
                 "id": account_id,
                 "name": display_name,
+                "streamer": streamer,
                 "file": f.name,
                 "is_active": is_active
             })
+
+        # If none matched active but accounts exist, mark the first one if active_channel is generic
+        if accounts and not any(a["is_active"] for a in accounts):
+            accounts[0]["is_active"] = True
 
         return accounts
 
@@ -101,26 +172,23 @@ class YouTubeUploader:
             if not target_file.exists():
                 raise FileNotFoundError(f"Account token not found for: {account_id}")
 
+        account_stem = target_file.stem
+
         # Overwrite current token.json with target account token
         shutil.copy(target_file, self.token_path)
 
-        # Force reload service
-        self.reload_credentials()
-        new_name = account_id.replace("_", " ")
-        try:
-            info = self.get_channel_info()
-            if info.get("channel_title") and info["channel_title"] not in ["Not Connected", "Auth Error", "No Channel Found"]:
-                new_name = info["channel_title"]
-        except Exception:
-            info = {}
+        # Force reload service lazily on next API call
+        self._service = None
+        target_streamer = self.get_streamer_for_account(account_stem)
 
-        state.youtube_channel = new_name
-        state.add_col3_log(f"Switched active YouTube channel to: {new_name}")
+        state.youtube_channel = account_stem
+        state.add_col3_log(f"Switched active YouTube account to: {account_stem} (Streamer: #{target_streamer})")
 
         return {
             "status": "SWITCHED",
-            "active_channel": new_name,
-            "channel_info": info if 'info' in locals() else {}
+            "account_id": account_stem,
+            "active_channel": account_stem,
+            "streamer": target_streamer
         }
 
     def get_channel_info(self) -> Dict[str, Any]:
@@ -238,21 +306,39 @@ class YouTubeUploader:
         service = self.get_service()
         state.add_col3_log(f"Uploading to YouTube Shorts: {title}...")
 
+        # Enforce YouTube Shorts requirements:
+        # 1. Title must include #Shorts or #shorts
+        shorts_tag = "#shorts"
+        if "#shorts" not in title.lower():
+            if len(title) > 90:
+                title = title[:90].rstrip() + f" {shorts_tag}"
+            else:
+                title = f"{title} {shorts_tag}"
+
+        # 2. Description must include #shorts and trending hashtags
+        if "#shorts" not in description.lower():
+            description = f"{description}\n\n#shorts #youtubeshorts #gaming #viral"
+
+        # Determine valid YouTube privacy status (must be private, public, or unlisted)
+        privacy_setting = settings.YOUTUBE_DEFAULT_PRIVACY.lower()
+        if privacy_setting not in ["private", "public", "unlisted"]:
+            privacy_setting = "public" if not schedule_time_iso else "private"
+
         # Setup metadata body
         body = {
             "snippet": {
                 "title": title[:100],
                 "description": description,
-                "tags": tags,
+                "tags": list(set(tags + ["shorts", "youtubeshorts", "short", "viral"])),
                 "categoryId": "20" # Gaming category
             },
             "status": {
-                "privacyStatus": settings.YOUTUBE_DEFAULT_PRIVACY,
+                "privacyStatus": privacy_setting,
                 "selfDeclaredMadeForKids": False
             }
         }
 
-        # If scheduled time is provided, YouTube requires privacyStatus = 'private' with publishAt
+        # If scheduled time is provided, YouTube strictly requires privacyStatus = 'private' with publishAt
         if schedule_time_iso:
             body["status"]["privacyStatus"] = "private"
             body["status"]["publishAt"] = schedule_time_iso

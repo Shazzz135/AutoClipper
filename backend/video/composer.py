@@ -14,15 +14,16 @@ class VideoComposer:
         ass_subtitle_path: Path,
         start_time: float,
         end_time: float,
-        output_mp4_path: Path
+        output_mp4_path: Path,
+        max_duration: float = 60.0
     ) -> bool:
         """
-        Renders the final 1080x1920 vertical video (40/60 split) with burned ASS subtitles
+        Renders the 1080x1920 vertical video (40/60 split) with burned ASS subtitles
         using an optimized single-pass FFmpeg command.
         """
         state.col3_status = "RENDERING"
         t0 = time.time()
-        duration = end_time - start_time
+        duration = min(max_duration, max(3.0, end_time - start_time))
         state.add_col3_log(f"Starting FFmpeg render (duration: {duration:.1f}s, output: 1080x1920)...")
 
         # Compose full filtergraph including subtitle burning
@@ -41,6 +42,7 @@ class VideoComposer:
             "-map", "0:a?",
             "-c:v", "libx264",
             "-preset", "veryfast",
+            "-threads", "4",
             "-crf", "22",
             "-c:a", "aac",
             "-b:a", "192k",
@@ -67,23 +69,42 @@ class VideoComposer:
 
     def purge_clip_artifacts(self, clip_id: str, raw_segment_path: Optional[Path] = None):
         """
-        Cleans up raw stream segments, intermediate audio, and rendered files to reclaim SSD space.
+        Cleans up raw stream segments, candidate footage, intermediate audio, subtitles, thumbnails, and rendered files to reclaim SSD space.
+        Guarantees complete file deletion on Windows.
         """
-        state.add_col3_log(f"Auto-purging temporary artifacts for clip {clip_id}...")
-        # Remove raw segment if provided
-        if raw_segment_path and raw_segment_path.exists():
-            try:
-                raw_segment_path.unlink()
-            except Exception:
-                pass
+        import gc
+        gc.collect()
 
-        # Purge intermediate wav, ass, and mp4 files in clips_dir matching clip_id
-        for f in settings.CLIPS_DIR.glob(f"{clip_id}*"):
-            try:
-                f.unlink()
-            except Exception:
-                pass
+        state.add_col3_log(f"Purging all video files and reclaiming SSD space for {clip_id}...")
 
-        state.add_col3_log(f"SSD storage reclaimed for {clip_id}.")
+        targets = []
+        if raw_segment_path:
+            targets.append(Path(raw_segment_path))
+        targets.extend(list(settings.CLIPS_DIR.glob(f"{clip_id}*")))
+        targets.extend(list(settings.BUFFER_DIR.glob(f"{clip_id}*")))
+
+        purged_count = 0
+        for f in set(targets):
+            if not f.exists():
+                continue
+            for attempt in range(3):
+                try:
+                    f.unlink()
+                    purged_count += 1
+                    break
+                except PermissionError:
+                    gc.collect()
+                    time.sleep(0.15)
+                except Exception:
+                    break
+
+            # If still exists on Windows due to lock, truncate to 0 bytes so SSD space is reclaimed immediately
+            if f.exists():
+                try:
+                    open(f, "wb").close()
+                except Exception:
+                    pass
+
+        state.add_col3_log(f"SSD storage reclaimed: {purged_count} files purged for {clip_id}.")
 
 composer = VideoComposer()

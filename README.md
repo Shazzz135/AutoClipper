@@ -2,7 +2,7 @@
 
 **AutoClipper** is a real-time autonomous video clipping, computer vision framing, speech transcription, and YouTube Shorts publishing pipeline engineered for high-energy Twitch broadcasts.
 
-The system runs locally in the background on your hardware or in Docker, featuring a 3-column real-time web dashboard and dedicated clip review page.
+The system runs locally in the background on your hardware or in Docker, featuring a modern brutalist dashboard, an interactive 16:9 **Clip Studio** with dual-box framing, and a dedicated 9:16 vertical preview & scheduling interface.
 
 ---
 
@@ -27,6 +27,83 @@ Then open your browser to:
 
 ---
 
+## 🚀 Key Features & Tools
+
+### 1. 🎬 Interactive 16:9 Clip Studio (`ClipStudio.tsx`)
+When a peak occurs or when browsing clips, AutoClipper loads the candidate footage into a studio workspace:
+* **True 16:9 Video Canvas**: Pixel-accurate display matching source resolution (`frameDim.w / frameDim.h`) with zero black borders.
+* **Dual-Box Visual Framing**:
+  * 🔴 **Red Box (Facecam)**: Clamped to a 9:6.4 (40% canvas) aspect ratio for the top section.
+  * 🔵 **Blue Box (Gameplay)**: Clamped to a 9:9.6 (60% canvas) aspect ratio for the bottom section.
+  * Drag, resize, or reposition boxes with live coordinate tracking and edge snapping.
+  * **Auto-Detect Facecam**: One-click MediaPipe/YOLO detection with room/border boundary awareness.
+  * **CLEAR ALL**: Instant reset to custom-crop any scene from scratch.
+* **4-Minute Extended Candidate Timeline (240s)**:
+  * Automatically captures **3 minutes before the peak** and **1 minute after the peak**.
+  * Built-in **4.5-second Twitch reaction delay compensation** so peak markers align with visual in-game moments rather than delayed chat reactions.
+* **Modernized Scrubber & Trimming**:
+  * **Dedicated Video Position Scrubber**: Seamless seeking across the entire 240 seconds with instant time readout.
+  * **Thin Green Trim Handles**: Minimalist `w-1.5` green start and end vertical indicators with expanded grab targets and subtle hover glows.
+  * **Peak Moment Marker**: Visual yellow badge pinned to the exact peak event on the timeline.
+* **AI Metadata Suite**:
+  * Automatic viral title, description, and tags generated on peak ingest.
+  * **REGENERATE AI TITLE** button to generate fresh title variations instantly.
+* **Single-Click "CONFIRM & CREATE CLIP"**:
+  * Trims selected start and end timestamps.
+  * Fires single-pass FFmpeg 40/60 vertical composite.
+  * Runs Faster-Whisper transcription and burns karaoke subtitles.
+  * Smoothly navigates to the 9:16 Preview & Post page.
+
+---
+
+### 2. ⚡ Rolling Ring Buffer & Anti-Freeze Video Engine
+* **8-Minute Rolling Ring Buffer**: Uses Streamlink and FFmpeg MPEG-TS segmenting to continuously maintain the last 8 minutes of live stream footage.
+* **Continuous Timestamp Engine**:
+  * Omits `-reset_timestamps 1` so PTS/DTS timestamps remain strictly continuous across `.ts` chunks.
+  * Uses byte-level MPEG-TS merging + single-pass remux (`-fflags +genpts+igndts -avoid_negative_ts make_zero -movflags +faststart`).
+  * **Zero Playback Freeze**: Completely eliminates video playback freezing at ~60 seconds, enabling smooth scrub across all 240 seconds.
+* **Post-Peak Reaction Accumulator**:
+  * The orchestrator automatically pauses for up to 60 seconds after a peak event to allow the stream buffer to capture the full 1-minute aftermath before cutting the candidate file.
+
+---
+
+### 3. 📈 Real-Time Peak Detection & Twitch GQL Live Polling
+* **Live Audience Polling**: Polls Twitch GQL every 15 seconds to fetch accurate live viewer counts without API keys.
+* **Dynamic Velocity Tiers**: Calibrates chat message velocity and Z-score baselines dynamically according to streamer audience size (`MEGA`, `LARGE`, `MEDIUM`, `SMALL`).
+* **Multi-Factor Scoring**:
+  * **Audio Scream / Loudness Discount**: Decreases required Z-score by `-0.35` on audio decibel spikes (throttled to avoid event-loop blocking).
+  * **Emote & Hype Density Discount**: Decreases required Z-score by `-0.25` when chat spam contains high caps or hype emote concentration.
+* **Manual Peak Sensitivity Drawer**: Sliders in Column 1 allow adjusting Base Z-Score, chat velocity multiplier, and cooldown in real time.
+
+---
+
+### 4. 🤖 Fully Autonomous & Semi-Autonomous Modes
+* **Auto-Process Mode**: Automatically captures, frames, transcribes, and renders detected peaks into vertical Shorts without manual clicks.
+* **Auto-Upload Mode**: Dispatches finalized clips directly to YouTube according to scheduled publishing windows.
+* **Manual Review Safe Mode**: Default mode lets you review, refine crop boxes, adjust trim points, edit titles, and approve uploads before publishing.
+
+---
+
+### 5. 🗣️ Faster-Whisper Audio Transcription & Karaoke Subtitles
+* **Local Faster-Whisper**: Runs high-speed local audio transcription without external API costs or latency.
+* **Word Limit Chunking**: Subtitles strictly enforce **maximum 4 words per row** for maximum readability on mobile screens.
+* **Natural Pause Snapping**: Trims clip boundaries at natural speech silences ($>0.3\text{s}$) to avoid awkward mid-word cuts.
+* **Dynamic Karaoke Styling**: Active spoken words glow red (`#FF1E1E`) with high-contrast outlines on white italicized text.
+* **Smart Censorship**: Profanity is masked in subtitle text (`f***`) while audio remains 100% untouched.
+
+---
+
+### 6. 📱 Dedicated Preview & Scheduling Interface (`/preview`)
+* **1080×1920 Vertical Player**: Immediate playback with native sound and subtitle inspection.
+* **1-Post-A-Day Anti-Clustering Scheduler**: Automatically calculates optimal YouTube scheduled time slots (e.g. 12:00 PM, 3:30 PM, 7:00 PM) to maximize algorithm reach.
+* **Direct Actions**:
+  * `APPROVE & SCHEDULE`: Submits video to YouTube with privacy status set to `private` and `publishAt` set to the calculated time slot.
+  * `UPLOAD NOW`: Immediately publishes to YouTube as public or unlisted.
+  * `DOWNLOAD MP4`: Saves rendered short directly to your device.
+  * `PURGE CLIP`: Instantly deletes video files, candidate clips, thumbnails, and temp artifacts to reclaim SSD space.
+
+---
+
 ## 📋 Prerequisites
 
 Before running AutoClipper, ensure you have the following installed:
@@ -43,7 +120,7 @@ Before running AutoClipper, ensure you have the following installed:
 
 ```powershell
 # Clone the repository
-git clone <your-repository-url>
+git clone https://github.com/Shazzz135/AutoClipper.git
 cd AutoClipper
 
 # Create and activate a Python virtual environment
@@ -53,7 +130,7 @@ python -m venv venv
 # Install Python requirements
 pip install -r requirements.txt
 
-# (Optional) Rebuild the React frontend if modifying UI code
+# Build the React/TypeScript frontend
 npm --prefix frontend install
 npm --prefix frontend run build
 ```
@@ -87,7 +164,7 @@ YOUTUBE_TOKEN_PATH=config/token.json
 # Twitch Stream Ingestion
 TWITCH_CHANNEL=jynxzi
 STREAM_QUALITY=720p60
-BUFFER_MINUTES=5
+BUFFER_MINUTES=8
 
 # Peak Detection & Clipping Defaults
 MAX_CLIP_DURATION=45
@@ -117,7 +194,7 @@ AUTO_UPLOAD_ENABLED=false
 REVIEW_COUNTDOWN_MINUTES=10
 
 # Server Binding
-BACKEND_HOST=0.0.0.0
+BACKEND_HOST=localhost
 BACKEND_PORT=8000
 FRONTEND_PORT=3000
 ```
@@ -126,124 +203,31 @@ FRONTEND_PORT=3000
 
 ### Step 3: Obtain a Free Gemini AI API Key
 
-AutoClipper uses Google Gemini to generate viral titles, descriptions, and hashtag metadata from audio transcripts:
-
+AutoClipper uses Google Gemini to generate viral titles, descriptions, and hashtag metadata:
 1. Visit [Google AI Studio](https://aistudio.google.com/).
 2. Sign in with your Google account.
 3. Click **Get API key** and generate a new key.
-4. Copy your key and paste it into `.env`:
+4. Paste the key into `.env`:
    ```env
    GEMINI_API_KEY=AIzaSy...your_actual_key_here
    ```
-*(Note: If no API key is provided or the 30 calls/day limit is reached, AutoClipper automatically falls back to an offline heuristic title generator so rendering never halts).*
+*(Note: If no API key is provided or the daily quota is reached, AutoClipper automatically falls back to an offline heuristic title generator).*
 
 ---
 
-### Step 4: Obtain YouTube Data API v3 OAuth Credentials
+### Step 4: YouTube Data API v3 OAuth Credentials (Optional for Direct Uploads)
 
 To enable automatic scheduling and direct Shorts publishing to your YouTube channel:
-
-1. **Open Google Cloud Console**:
-   Go to [https://console.cloud.google.com/](https://console.cloud.google.com/).
-2. **Create a Project**:
-   Click the project dropdown in the top bar and click **New Project** (e.g. name it `AutoClipper`).
-3. **Enable YouTube Data API v3**:
-   - Go to **APIs & Services** > **Library**.
-   - Search for `YouTube Data API v3`.
-   - Click on it and click **Enable**.
-4. **Configure OAuth Consent Screen**:
-   - Go to **APIs & Services** > **OAuth consent screen**.
-   - Select **External** and click **Create**.
-   - Fill in the required fields:
-     - **App name**: `AutoClipper`
-     - **User support email**: (Your personal Google email)
-     - **Developer contact information**: (Your personal Google email)
-   - Click **Save and Continue**.
-   - **Scopes**: Click **Add or Remove Scopes**, select:
-     - `.../auth/youtube.upload` (Upload YouTube videos)
-     - `.../auth/youtube` (Manage your YouTube account)
-   - Click **Save and Continue**.
-   - **Test Users**: Under Test Users, click **Add Users** and enter the Google email address that owns your target YouTube channel.
-   - Click **Save and Continue**.
-5. **Create Desktop OAuth Client ID**:
-   - Go to **APIs & Services** > **Credentials**.
-   - Click **Create Credentials** > **OAuth client ID**.
-   - For **Application type**, select **Desktop app**.
-   - Set Name to `AutoClipper Desktop`.
-   - Click **Create**.
-6. **Download the Secrets File**:
-   - Click the **Download JSON** button next to your new Client ID.
-   - Rename the downloaded file to `client_secrets.json`.
-   - Place this file in the `config/` directory:
-     ```
-     AutoClipper/config/client_secrets.json
-     ```
-7. **Authenticate Your Channel**:
-   Run the one-click authentication script:
+1. Go to [Google Cloud Console](https://console.cloud.google.com/) and create a project (`AutoClipper`).
+2. Enable **YouTube Data API v3**.
+3. Configure the **OAuth Consent Screen** (User Type: External, Scopes: `youtube.upload` and `youtube`, add your email as a Test User).
+4. Create an **OAuth Client ID** of type **Desktop app**.
+5. Download the client secrets JSON, rename it to `client_secrets.json`, and place it in `config/client_secrets.json`.
+6. Run the authentication script:
    ```powershell
    .\login_youtube.bat
    ```
-   * A browser tab will open requesting permission.
-   * Select your Google account and choose your YouTube channel.
-   * Click **Continue** (or click Advanced > Go to AutoClipper if in Testing mode) and click **Allow**.
-   * The script verifies your channel and saves an auto-refreshing authorization token to `config/token.json`.
-
----
-
-## 🖥️ Using the Application
-
-### Two-Tier Navbar Controls
-* **Top Row**:
-  * `AUTOCLIPPER`: Application brand.
-  * `STREAM`: Click the pencil icon to switch target Twitch channels anytime.
-  * Status Badge: Displays `720p60 LIVE`, `PAUSED (OFF)`, or `OFFLINE`.
-  * System Telemetry: Live CPU utilization, buffer size in MB, daily AI call budget (`X / 30`), and clip count.
-  * `YT: CONNECTED`: Confirms your YouTube channel is authenticated without leaking channel names.
-* **Bottom Row**:
-  * `[ENGINE: RUNNING / PAUSED]`: Master switch to halt or resume Twitch stream ingestion and IRC tracking.
-  * `[AUTO-PROCESS: ON/OFF]`: Toggles automatic clipping of detected peak hype spikes.
-  * `[AUTO-UPLOAD: ON/OFF]`: Toggles automatic dispatch to YouTube upon rendering.
-  * `[🔊]`: Audio chime on chat hype spike.
-  * Far-Right Triggers:
-    * `TEST PEAK TRIGGER`: Simulates an artificial chat surge to test the entire pipeline.
-    * `PREVIEW CLIP →`: Opens the active clip review page.
-
----
-
-### Column 1: Peak Detection & Chat Stream
-* **Multi-Factor Dynamic Requirements**:
-  * Adapts baseline message velocity and Z-score thresholds based on streamer scale (`MEGA`, `LARGE`, `MEDIUM`, `SMALL`).
-  * Live **Audio Scream Discount** (-0.35 Z on loud audio).
-  * Live **Chat Hype Density Discount** (-0.25 Z on emote / all-caps surges).
-  * Adjustable drawer to tune sensitivity, Base Z, and velocity targets.
-* **Single-Clip Enforcement**: Strict mutex lock prevents concurrent processing—only 1 clip can process at a time.
-* **Channel Switch Auto-Clear**: Changing the active streamer wipes all 3 columns and resets rolling buffers cleanly.
-
----
-
-### Column 2: Facecam & Visual Framing
-* **Primary Rule 1 (Webcam with Background / Border)**:
-  * Detects the streamer's webcam overlay box and scales the entire section to measure just over $1080 \times 768$ (Top 40%).
-  * Eliminates gameplay bleed and preserves full room/chair background without over-zooming.
-* **Secondary Rule 2 (Cutout / Green Screen)**:
-  * When no background or border exists, sizes the face to **exactly 50% of the 40% screen** ($384\text{px}$ tall) and centers it.
-* **Interactive Mode Selector**: Toggle between `AUTO-DETECT`, `BOX (WITH BG)`, and `CUTOUT (NO BG)` in real time.
-
----
-
-### Column 3: Speech, Subtitles & Rendering
-* **Word Limit Chunking**: Subtitles and transcripts strictly enforce **maximum 4 words per row** with no character limits.
-* **Natural Pause Snapping**: Cuts clip boundaries at natural speech silences ($>0.3\text{s}$) to avoid mid-sentence cutoffs.
-* **Dynamic Karaoke Red Highlighting**: Active spoken words turn red (`#FF1E1E`) on white italicized text.
-* **Text-Only Censorship**: Profanity is masked in subtitle text (`f***`) while audio remains 100% raw.
-
----
-
-### Dedicated Preview & Review Page (`/preview`)
-* Full $1080 \times 1920$ vertical player with instant playback.
-* Direct **Download MP4** button.
-* YouTube scheduled slot display with 1-post-a-day anti-clustering logic.
-* **Manual Confirmation Safe Mode**: You explicitly approve or reject each clip before YouTube publishing.
+7. Approve permissions in the browser. The token is saved to `config/token.json` and auto-refreshes.
 
 ---
 
@@ -258,9 +242,14 @@ AutoClipper/
 │   ├── uploader/       # YouTube Data API v3 uploader & token switcher
 │   ├── video/          # Single-pass FFmpeg compositor
 │   └── main.py         # FastAPI application & WebSocket server
-├── frontend/           # React + Vite brutalist dashboard
-│   └── src/components/ # Column1Peak, Column2Facecam, Column3Speech, Header, PreviewPage
-├── config/             # client_secrets.json & token.json (Excluded by .gitignore)
+├── frontend/           # React 18 + TypeScript + Vite + Tailwind CSS
+│   ├── src/
+│   │   ├── components/ # ClipStudio, Column1Peak, Column2Facecam, Column3Speech, Header, PreviewPage
+│   │   ├── services/   # Sound notification dispatcher
+│   │   ├── App.tsx     # Main application layout & WebSocket listener
+│   │   └── main.tsx    # Application entry point
+│   └── package.json
+├── config/             # client_secrets.json & token.json (Strictly ignored by .gitignore)
 ├── scripts/            # Standalone YouTube OAuth verification script
 ├── start.bat           # 1-Click native Windows startup script
 ├── login_youtube.bat   # 1-Click YouTube channel login script

@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     # Twitch Ingestion
     TWITCH_CHANNEL: str = "jynxzi"
     STREAM_QUALITY: str = "720p60"
-    BUFFER_MINUTES: int = 5
+    BUFFER_MINUTES: int = 8
 
     # Peak Detection & Quality Filtering
     MAX_CLIP_DURATION: int = 45
@@ -55,7 +55,7 @@ class Settings(BaseSettings):
     SUBTITLE_CENSOR_TEXT: bool = True
 
     # Server
-    BACKEND_HOST: str = "0.0.0.0"
+    BACKEND_HOST: str = "localhost"
     BACKEND_PORT: int = 8000
     FRONTEND_PORT: int = 3000
 

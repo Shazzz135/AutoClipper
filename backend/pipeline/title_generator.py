@@ -8,20 +8,20 @@ from backend.core.state import state
 # Suppress library deprecation warning
 warnings.filterwarnings("ignore", category=FutureWarning)
 
-try:
-    import google.generativeai as genai
-    HAS_GENAI = True
-except ImportError:
-    HAS_GENAI = False
-
 class TitleGenerator:
     def __init__(self):
         self.api_key = settings.GEMINI_API_KEY
-        if self.api_key and HAS_GENAI:
+        self._genai = None
+
+    def _get_genai(self):
+        if self._genai is None and self.api_key:
             try:
+                import google.generativeai as genai
                 genai.configure(api_key=self.api_key)
+                self._genai = genai
             except Exception:
-                pass
+                self._genai = False
+        return self._genai if self._genai else None
 
     def generate_title_and_metadata(
         self,
@@ -50,8 +50,8 @@ class TitleGenerator:
 
         can_call_ai = (
             bool(self.api_key) and
-            HAS_GENAI and
-            state.check_ai_rate_limit(settings.AI_MAX_CALLS_PER_MINUTE, settings.AI_MAX_CALLS_PER_DAY)
+            state.check_ai_rate_limit(settings.AI_MAX_CALLS_PER_MINUTE, settings.AI_MAX_CALLS_PER_DAY) and
+            bool(self._get_genai())
         )
 
         if can_call_ai:
@@ -77,6 +77,7 @@ class TitleGenerator:
         peak_info: Dict[str, Any],
         part: int
     ) -> Dict[str, Any]:
+        genai = self._get_genai()
         model = genai.GenerativeModel(model_name)
         streamer_tag = streamer.lower().replace(" ", "")
 
