@@ -1,0 +1,53 @@
+# Environment Variables & Private Configuration
+.env
+.env.*
+*.env
+*.env.local
+
+# Google & YouTube OAuth Secrets & Tokens (STRICTLY PRIVATE)
+config/*.json
+!config/.gitkeep
+config/tokens/
+config/token*.json
+config/client_secrets*.json
+credentials*.json
+client_secrets*.json
+token*.json
+*.token
+
+# Logs
+logs/
+*.log
+
+# Cache & Temporary Video Buffers & Media
+buffer/
+clips/
+temp/
+*.mp4
+*.ts
+*.wav
+*.jpg
+*.jpeg
+*.png
+*.ass
+test_frame.jpg
+
+# Python Cache & Virtual Environments
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+venv/
+.venv/
+env/
+
+# Node & Frontend Build
+node_modules/
+frontend/dist/
+frontend/node_modules/
+.npm/
+
+# OS Specific
+.DS_Store
+Thumbs.db
+desktop.ini

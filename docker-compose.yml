@@ -1,0 +1,21 @@
+services:
+  autoclipper:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: autoclipper
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./config:/app/config
+      - ./clips:/app/clips
+      - ./buffer:/app/buffer
+      - ./.env:/app/.env
+    deploy:
+      resources:
+        limits:
+          cpus: '4.0'
+          memory: 4096M
