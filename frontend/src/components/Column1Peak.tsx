@@ -369,9 +369,9 @@ export default function Column1Peak({ data, activeClipId, state }) {
             </div>
           </div>
 
-          <div className="h-44 overflow-y-auto text-[11px] font-mono space-y-1.5 bg-[#0d0f12] p-1.5 border border-[#262b34]">
+          <div className="max-h-64 overflow-y-auto text-[11px] font-mono space-y-2 bg-[#0d0f12] p-2 border border-[#262b34]">
             {visiblePeaks.length === 0 ? (
-              <div className="text-[#88909e] italic p-2 text-center">
+              <div className="text-[#88909e] italic p-3 text-center">
                 Waiting for hype spikes (&ge;{reqVelocity} msg/s, Z&ge;{reqZScore})...
               </div>
             ) : (
@@ -380,72 +380,74 @@ export default function Column1Peak({ data, activeClipId, state }) {
                 return (
                   <div
                     key={i}
-                    className="p-1.5 border border-[#262b34] bg-[#14171d] flex items-center justify-between gap-2 hover:border-[#ff1e1e]/60 transition-none"
+                    className="p-2 border border-[#262b34] bg-[#14171d] space-y-1.5 hover:border-[#ff1e1e]/60 transition-none"
                   >
-                    <div className="space-y-0.5 truncate">
-                      <div className="flex items-center gap-1.5">
-                        <strong className="text-white font-bold">{p.peak_id}</strong>
+                    {/* Top Row: Peak ID, Time, Velocity & Action Buttons */}
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <strong className="text-white font-bold text-xs">{p.peak_id}</strong>
                         <span className="text-[10px] text-[#88909e]">[{p.time}]</span>
-                        <span className="text-[9px] px-1 py-0.2 bg-[#ff1e1e]/20 text-[#ff1e1e] font-bold">
+                        <span className="text-[10px] px-1.5 py-0.5 bg-[#ff1e1e]/20 text-[#ff1e1e] font-bold border border-[#ff1e1e]/30">
                           {p.velocity} msg/s
                         </span>
                       </div>
-                      <div className="text-[10px] text-[#88909e] flex items-center gap-1.5">
-                        <span>Z: {p.z_score}</span>
-                        <span>•</span>
-                        <span className="flex items-center gap-0.5 text-yellow-400">
-                          <Volume2 className="w-2.5 h-2.5" />
-                          {p.loudness_db}dB ({p.intensity || 'NORMAL'})
-                        </span>
-                        {p.streamer_tier && (
-                          <>
-                            <span>•</span>
-                            <span className="text-blue-400 font-bold">{p.streamer_tier}</span>
-                          </>
-                        )}
-                        {p.hype_density !== undefined && (
-                          <>
-                            <span>•</span>
-                            <span className="text-[#00e676]">{p.hype_density}% Hype</span>
-                          </>
-                        )}
+
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <button
+                          onClick={() => handleProcessPeak(p.peak_id)}
+                          disabled={isProcessing || Boolean(activeClipId) || Boolean(state?.is_processing)}
+                          title={
+                            state?.is_processing
+                              ? 'A clip is currently rendering. Only 1 clip at a time permitted.'
+                              : activeClipId
+                              ? 'Only 1 clip at a time. Review or discard current clip first.'
+                              : isProcessing
+                              ? 'Processing this clip...'
+                              : 'Process this peak spike'
+                          }
+                          className={`px-2.5 py-1 text-[10px] font-bold font-mono uppercase flex items-center gap-1 transition-none ${
+                            isProcessing || activeClipId || state?.is_processing
+                              ? 'bg-[#262b34] text-[#88909e] cursor-not-allowed'
+                              : 'bg-[#ff1e1e] hover:bg-[#d01818] text-white cursor-pointer'
+                          }`}
+                        >
+                          <Play className="w-2.5 h-2.5" />
+                          {isProcessing || p.status === 'PROCESSING'
+                            ? 'PROCESSING'
+                            : (activeClipId || state?.is_processing)
+                            ? '1 AT A TIME'
+                            : 'PROCESS'}
+                        </button>
+
+                        <button
+                          onClick={(e) => handleDeletePeak(e, p.peak_id)}
+                          title="Delete / dismiss this peak from queue"
+                          className="p-1 bg-[#0d0f12] hover:bg-red-950/60 hover:text-red-400 text-[#88909e] border border-[#262b34]"
+                        >
+                          <Trash2 className="w-3 h-3" />
+                        </button>
                       </div>
                     </div>
 
-                    <div className="flex items-center gap-1 shrink-0">
-                      <button
-                        onClick={() => handleProcessPeak(p.peak_id)}
-                        disabled={isProcessing || Boolean(activeClipId) || Boolean(state?.is_processing)}
-                        title={
-                          state?.is_processing
-                            ? 'A clip is currently rendering. Only 1 clip at a time permitted.'
-                            : activeClipId
-                            ? 'Only 1 clip at a time. Review or discard current clip first.'
-                            : isProcessing
-                            ? 'Processing this clip...'
-                            : 'Process this peak spike'
-                        }
-                        className={`px-2 py-1 text-[10px] font-bold font-mono uppercase flex items-center gap-1 ${
-                          isProcessing || activeClipId || state?.is_processing
-                            ? 'bg-[#262b34] text-[#88909e] cursor-not-allowed'
-                            : 'bg-[#ff1e1e] hover:bg-[#d01818] text-white'
-                        }`}
-                      >
-                        <Play className="w-2.5 h-2.5" />
-                        {isProcessing || p.status === 'PROCESSING'
-                          ? 'PROCESSING'
-                          : (activeClipId || state?.is_processing)
-                          ? '1 CLIP AT A TIME'
-                          : 'PROCESS'}
-                      </button>
-
-                      <button
-                        onClick={(e) => handleDeletePeak(e, p.peak_id)}
-                        title="Delete / dismiss this peak from queue"
-                        className="p-1 bg-[#1a1f27] hover:bg-red-950/60 hover:text-red-400 text-[#88909e] border border-[#262b34]"
-                      >
-                        <Trash2 className="w-3 h-3" />
-                      </button>
+                    {/* Bottom Row: Clear, Unbroken Metrics Badges */}
+                    <div className="flex flex-wrap items-center gap-1.5 text-[10px]">
+                      <span className="bg-[#0d0f12] text-cyan-300 px-1.5 py-0.5 border border-[#262b34] font-bold">
+                        Z: {p.z_score}
+                      </span>
+                      <span className="bg-[#0d0f12] text-yellow-400 px-1.5 py-0.5 border border-[#262b34] flex items-center gap-1">
+                        <Volume2 className="w-2.5 h-2.5" />
+                        {p.loudness_db}dB ({p.intensity || 'NORMAL'})
+                      </span>
+                      {p.streamer_tier && (
+                        <span className="bg-[#0d0f12] text-blue-400 px-1.5 py-0.5 border border-[#262b34] font-bold">
+                          Tier: {p.streamer_tier}
+                        </span>
+                      )}
+                      {p.hype_density !== undefined && (
+                        <span className="bg-[#0d0f12] text-[#00e676] px-1.5 py-0.5 border border-[#262b34]">
+                          {p.hype_density}% Hype
+                        </span>
+                      )}
                     </div>
                   </div>
                 );

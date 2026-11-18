@@ -1,4 +1,5 @@
 import os
+import re
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from backend.core.config import settings
@@ -13,10 +14,19 @@ class SubtitleGenerator:
         self.active_color_ass = "&H001E1EFF&" # Vibrant Red
         self.default_color_ass = "&H00FFFFFF&" # Crisp White
 
-    def generate_ass_file(self, words: List[Dict[str, Any]], output_path: Path, offset_start: float = 0.0, clip_duration: Optional[float] = None):
+    def generate_ass_file(
+        self,
+        words: List[Dict[str, Any]],
+        output_path: Path,
+        offset_start: float = 0.0,
+        clip_duration: Optional[float] = None,
+        title: Optional[str] = None
+    ):
         """
-        Creates an ASS subtitle file with italic styling, max 4 words per line,
-        smooth word-by-word red karaoke transitions, and exact audio timestamp synchronization.
+        Creates an ASS subtitle file with:
+        - Temporary hook title between facecam & gameplay (fades out at 3.8s)
+        - Italic styling with max 4 words per line
+        - Smooth word-by-word red karaoke transitions synchronized to audio
         """
         state.add_col3_log(f"Compiling synchronized subtitles (offset: -{offset_start:.2f}s)...")
 
@@ -42,11 +52,12 @@ class SubtitleGenerator:
 
         if not adjusted_words:
             state.add_col3_log("Notice: No speech words fell within the selected clip window.")
-            # Write empty valid ASS file
-            self._write_empty_ass(output_path)
+            # Write empty valid ASS file (still includes hook title if present)
+            self._write_empty_ass(output_path, title=title)
             return
 
         # ASS Header (Italic, centered at Y=830, bottom of facecam / top of gameplay)
+        # DividerTitle is anchored at Y=745 (directly between facecam and gameplay) with smooth fade
         header = f"""[Script Info]
 ScriptType: v4.00+
 PlayResX: 1080
@@ -56,6 +67,7 @@ ScaledBorderAndShadow: yes
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
 Style: Default,Arial,68,{self.default_color_ass},&H000000FF&,&H00000000&,&H90000000&,-1,-1,0,0,100,100,0,0,1,6,3,2,40,40,{self.margin_v},1
+Style: DividerTitle,Arial,52,&H00FFFFFF&,&H000000FF&,&H00000000&,&HD0000000&,-1,0,0,0,100,100,0,0,1,5,3,8,40,40,745,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -64,6 +76,19 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         # Group words into chunks of max 4 words / <= 24 chars
         chunks = self._chunk_words(adjusted_words)
         events = []
+
+        # Add temporary title between facecam & gameplay (fades in at 0.2s, fades out at 3.8s)
+        # Strictly strip all hashtags (#shorts, #kai, #stream, etc.) from on-screen video title
+        if title:
+            clean_title = re.sub(r'#\S*', '', title).strip().upper()
+            clean_title = re.sub(r'\s+', ' ', clean_title)
+            if clean_title:
+                if len(clean_title) > 36:
+                    words_title = clean_title.split()
+                    mid = len(words_title) // 2
+                    clean_title = " ".join(words_title[:mid]) + "\\N" + " ".join(words_title[mid:])
+                title_event = f"Dialogue: 1,0:00:00.20,0:00:03.80,DividerTitle,,0,0,0,,{{\\fad(250,400)\\b1}}{clean_title}"
+                events.append(title_event)
 
         for chunk_idx, chunk in enumerate(chunks):
             if not chunk:
@@ -141,8 +166,19 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             centisecs = 99
         return f"{hours:01d}:{minutes:02d}:{secs:02d}.{centisecs:02d}"
 
-    def _write_empty_ass(self, output_path: Path):
-        content = """[Script Info]
+    def _write_empty_ass(self, output_path: Path, title: Optional[str] = None):
+        events = []
+        if title:
+            clean_title = re.sub(r'#\S*', '', title).strip().upper()
+            clean_title = re.sub(r'\s+', ' ', clean_title)
+            if clean_title:
+                if len(clean_title) > 36:
+                    words_title = clean_title.split()
+                    mid = len(words_title) // 2
+                    clean_title = " ".join(words_title[:mid]) + "\\N" + " ".join(words_title[mid:])
+                events.append(f"Dialogue: 1,0:00:00.20,0:00:03.80,DividerTitle,,0,0,0,,{{\\fad(250,400)\\b1}}{clean_title}")
+
+        content = f"""[Script Info]
 ScriptType: v4.00+
 PlayResX: 1080
 PlayResY: 1920
@@ -150,10 +186,11 @@ PlayResY: 1920
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
 Style: Default,Arial,60,&H00FFFFFF&,&H000000FF&,&H00000000&,&H80000000&,-1,-1,0,0,100,100,0,0,1,5,2,2,40,40,830,1
+Style: DividerTitle,Arial,52,&H00FFFFFF&,&H000000FF&,&H00000000&,&HD0000000&,-1,0,0,0,100,100,0,0,1,5,3,8,40,40,745,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
-"""
+""" + "\n".join(events)
         with open(output_path, "w", encoding="utf-8") as f:
             f.write(content)
 

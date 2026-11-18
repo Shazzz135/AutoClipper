@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Activity, Radio, Cpu, HardDrive, Sparkles, Video, Play, Edit2, Check, Volume2, VolumeX, Zap, UploadCloud } from 'lucide-react';
 import { sound } from '../services/sound';
 
-export default function Header({ state, view, setView, onTriggerTest }) {
+export default function Header({ state, view, setView, onOpenPreview, isBuildingPreview, onTriggerTest }) {
   const isAllOk = state?.all_processes_ok;
   const activeClipId = state?.active_clip_id;
   const [isEditingChannel, setIsEditingChannel] = useState(false);
@@ -11,6 +11,44 @@ export default function Header({ state, view, setView, onTriggerTest }) {
   const [togglingProcess, setTogglingProcess] = useState(false);
   const [togglingUpload, setTogglingUpload] = useState(false);
   const [togglingMonitoring, setTogglingMonitoring] = useState(false);
+  const [ytAccounts, setYtAccounts] = useState([]);
+  const [switchingYt, setSwitchingYt] = useState(false);
+
+  const fetchYtAccounts = async () => {
+    try {
+      const res = await fetch('/api/youtube/accounts');
+      if (res.ok) {
+        const data = await res.json();
+        setYtAccounts(data.accounts || []);
+      }
+    } catch (e) {
+      console.error('Error fetching YouTube accounts:', e);
+    }
+  };
+
+  useEffect(() => {
+    fetchYtAccounts();
+  }, [state?.youtube_channel]);
+
+  const handleYtAccountSwitch = async (accountId) => {
+    if (!accountId) return;
+    setSwitchingYt(true);
+    try {
+      const res = await fetch('/api/youtube/switch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ account_id: accountId })
+      });
+      if (res.ok) {
+        await fetchYtAccounts();
+        if (setView) setView('dashboard');
+      }
+    } catch (e) {
+      console.error('Failed to switch YouTube account:', e);
+    } finally {
+      setSwitchingYt(false);
+    }
+  };
 
   const toggleMonitoring = async () => {
     setTogglingMonitoring(true);
@@ -156,9 +194,29 @@ export default function Header({ state, view, setView, onTriggerTest }) {
 
           <div className="flex items-center gap-1.5 bg-[#0d0f12] px-2 py-0.5 border border-[#262b34] text-[11px] font-mono">
             <span className="text-[#88909e]">YT:</span>
-            <span className={`font-bold ${state?.youtube_authenticated !== false && state?.youtube_channel !== 'NOT CONNECTED' ? 'text-[#00e676]' : 'text-yellow-400'}`}>
-              {state?.youtube_authenticated !== false && state?.youtube_channel !== 'NOT CONNECTED' ? 'CONNECTED' : 'NOT CONNECTED'}
-            </span>
+            {ytAccounts.length > 0 ? (
+              <select
+                value={
+                  ytAccounts.find(a => a.is_active || a.id.toLowerCase() === (state?.youtube_channel || '').toLowerCase())?.id ||
+                  ytAccounts[0]?.id ||
+                  ''
+                }
+                onChange={(e) => handleYtAccountSwitch(e.target.value)}
+                disabled={switchingYt}
+                className="bg-transparent text-[#00e676] font-bold outline-none cursor-pointer border-none py-0 text-[11px]"
+                title="Select YouTube account to post to (automatically sets tracked Twitch streamer)"
+              >
+                {ytAccounts.map((acc) => (
+                  <option key={acc.id} value={acc.id} className="bg-[#14171d] text-white">
+                    {acc.name} (#{acc.streamer})
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <span className={`font-bold ${state?.youtube_authenticated !== false && state?.youtube_channel !== 'NOT CONNECTED' ? 'text-[#00e676]' : 'text-yellow-400'}`}>
+                {state?.youtube_authenticated !== false && state?.youtube_channel !== 'NOT CONNECTED' ? (state?.youtube_channel || 'CONNECTED') : 'NOT CONNECTED'}
+              </span>
+            )}
           </div>
         </div>
       </div>
@@ -245,22 +303,23 @@ export default function Header({ state, view, setView, onTriggerTest }) {
 
           {view === 'dashboard' ? (
             <button
-              onClick={() => setView('preview')}
-              disabled={!activeClipId}
+              onClick={() => (onOpenPreview ? onOpenPreview() : setView('preview'))}
+              disabled={!activeClipId || !state?.active_clip?.clip_created || isBuildingPreview}
               className={`px-3 py-1 text-xs font-mono font-bold transition-none ${
-                activeClipId
-                  ? 'bg-[#ff1e1e] text-white hover:bg-[#d01818]'
+                activeClipId && state?.active_clip?.clip_created
+                  ? 'bg-[#ff1e1e] text-white hover:bg-[#d01818] cursor-pointer'
                   : 'bg-[#262b34] text-[#88909e] cursor-not-allowed'
               }`}
+              title={state?.active_clip?.clip_created ? 'Open Preview & Post Page' : 'Click Confirm & Create Clip in the 16:9 Studio first'}
             >
-              PREVIEW CLIP {state?.active_clip ? `(${state.active_clip.date_short || state.active_clip.name || state.active_clip.date})` : ''} &rarr;
+              PREVIEW CLIP {state?.active_clip?.clip_created ? `(${state.active_clip.date_short || state.active_clip.name})` : ''} &rarr;
             </button>
           ) : (
             <button
               onClick={() => setView('dashboard')}
-              className="bg-[#262b34] text-white hover:bg-[#343b47] px-3 py-1 text-xs font-mono transition-none"
+              className="bg-[#262b34] text-white hover:bg-[#343b47] px-3 py-1 text-xs font-mono transition-none cursor-pointer"
             >
-              &larr; BACK TO PROCESSES
+              &larr; BACK TO 16:9 STUDIO
             </button>
           )}
         </div>

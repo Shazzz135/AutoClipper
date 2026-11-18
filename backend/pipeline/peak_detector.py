@@ -19,6 +19,8 @@ class PeakDetector:
         self.timestamps: List[float] = [] # Timestamps of received chat messages
         self.chat_history: List[Dict[str, Any]] = [] # [{'time': float, 'text': str, 'user': str}]
         self.last_peak_time: float = 0.0
+        self.last_audio_check_time: float = 0.0
+        self.cached_audio_loudness_db: float = -22.0
         self.peak_counter: int = 100
 
     def reset(self):
@@ -61,25 +63,23 @@ class PeakDetector:
         Dynamically adjusts required velocity and Z-score based on streamer scale (viewers, baseline),
         audio loudness (screams), and chat sentiment (hype density).
         """
-        # 1. Estimate viewers if not supplied from stream metadata
+        # 1. Keep live viewer count for display, but calibrate chat velocity thresholds by actual IRC chat speed
+        # so Twitch's anonymous IRC rate cap on 90k+ streams never sets an unreachable velocity floor.
         now = time.time()
         recent_window_chatters = set(
             c.get("user") for c in self.chat_history
             if c.get("user") and (now - c.get("time", 0) <= 180.0)
         )
         if state.stream_viewers <= 0:
-            estimated_viewers = max(50, len(recent_window_chatters) * 15)
-            state.stream_viewers = estimated_viewers
-        else:
-            estimated_viewers = state.stream_viewers
+            state.stream_viewers = max(50, len(recent_window_chatters) * 15)
 
-        # 2. Determine Streamer Tier (Auto or User Selected)
+        # 2. Determine Chat Tier from actual observed baseline chat velocity (like before, so thresholds match real IRC speed)
         if state.peak_streamer_tier == "AUTO":
-            if estimated_viewers >= 15000 or baseline_velocity >= 12.0:
+            if baseline_velocity >= 12.0:
                 tier = "MEGA"
-            elif estimated_viewers >= 4000 or baseline_velocity >= 4.0:
+            elif baseline_velocity >= 4.0:
                 tier = "LARGE"
-            elif estimated_viewers >= 800 or baseline_velocity >= 1.5:
+            elif baseline_velocity >= 1.5:
                 tier = "MEDIUM"
             else:
                 tier = "SMALL"
@@ -105,26 +105,22 @@ class PeakDetector:
             state.peak_req_z_score = state.peak_base_z
             return
 
-        # 3. Scale minimum velocity & Z-score by streamer tier
+        # 3. Scale minimum velocity & Z-score by actual chat velocity tier (restored original thresholds that caught peaks reliably)
         if tier == "SMALL":
-            # Small streams (<800 viewers) average 0.2 - 1.5 msg/s. A jump to 2.5 msg/s is huge.
             floor_vel = 1.2
             base_z = 2.3 + z_mod
             computed_vel = max(floor_vel, baseline_velocity * surge_mult)
         elif tier == "MEDIUM":
-            # Medium streams (800 - 4k viewers) average 1.5 - 5 msg/s.
             floor_vel = 3.5
             base_z = 2.6 + z_mod
             computed_vel = max(floor_vel, baseline_velocity * surge_mult)
         elif tier == "LARGE":
-            # Large streams (4k - 15k viewers) average 5 - 15 msg/s.
             floor_vel = 7.5
             base_z = 2.9 + z_mod
             computed_vel = max(floor_vel, baseline_velocity * surge_mult)
-        else: # MEGA (Jynxzi, Kai Cenat, etc.)
-            # Mega streams (15k+ viewers) average 15 - 50+ msg/s.
+        else: # MEGA
             floor_vel = 12.0
-            base_z = 3.2 + z_mod
+            base_z = 3.0 + z_mod
             computed_vel = max(floor_vel, baseline_velocity * surge_mult)
 
         # 4. Audio Scream Boost
@@ -201,12 +197,18 @@ class PeakDetector:
 
     def _analyze_recent_audio_loudness(self) -> float:
         """
-        Samples the most recent buffer chunk to compute audio RMS decibel levels (screaming/laughing).
+        Samples the most recent buffer chunk at most once every 3 seconds (so tick() never stalls the event loop)
+        to compute audio RMS decibel levels (screaming/laughing).
         """
+        now = time.time()
+        if now - self.last_audio_check_time < 3.0:
+            return self.cached_audio_loudness_db
+        self.last_audio_check_time = now
+
         try:
             buffer_files = sorted(list(settings.BUFFER_DIR.glob("*.ts")), key=lambda p: p.stat().st_mtime)
             if not buffer_files:
-                return -24.0
+                return self.cached_audio_loudness_db
 
             latest_seg = buffer_files[-1]
             temp_wav = settings.BUFFER_DIR / "temp_loudness.wav"
@@ -219,7 +221,7 @@ class PeakDetector:
                 "-ar", "16000", "-ac", "1",
                 str(temp_wav)
             ]
-            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3)
 
             if temp_wav.exists():
                 import wave
@@ -232,11 +234,12 @@ class PeakDetector:
                 rms = np.sqrt(np.mean(audio**2))
                 if rms > 0:
                     db = 20 * np.log10(rms)
-                    return round(float(db), 1)
+                    self.cached_audio_loudness_db = round(float(db), 1)
+                    return self.cached_audio_loudness_db
         except Exception:
             pass
 
-        return -22.0
+        return self.cached_audio_loudness_db
 
     def _create_peak_entry(self, timestamp: float, z_score: float, velocity: float, loudness_db: float):
         self.peak_counter += 1

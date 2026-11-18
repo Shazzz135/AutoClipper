@@ -1,7 +1,7 @@
 import re
 import subprocess
 from pathlib import Path
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 from backend.core.config import settings
 from backend.core.state import state
 
@@ -24,46 +24,53 @@ class SpeechTranscriber:
     def _get_model(self):
         if self._model is None:
             try:
+                import os
                 from faster_whisper import WhisperModel
-                state.add_col3_log("Loading Faster-Whisper small.en CPU INT8 model...")
-                self._model = WhisperModel("small.en", device="cpu", compute_type="int8")
+                threads = min(4, os.cpu_count() or 4)
+                state.add_col3_log(f"Loading Faster-Whisper small.en CPU INT8 ({threads} threads)...")
+                self._model = WhisperModel("small.en", device="cpu", compute_type="int8", cpu_threads=threads)
                 state.add_col3_log("Faster-Whisper small.en loaded successfully.")
             except ImportError:
                 state.add_col3_log("Warning: faster-whisper not installed. Running in mock transcription mode.")
                 self._model = "MOCK"
         return self._model
 
-    def extract_audio(self, video_path: Path, audio_path: Path) -> bool:
-        cmd = [
-            "ffmpeg", "-y",
+    def extract_audio(self, video_path: Path, audio_path: Path, start_time: float = 0.0, duration: Optional[float] = None) -> bool:
+        cmd = ["ffmpeg", "-y"]
+        if start_time > 0.0:
+            cmd.extend(["-ss", str(round(start_time, 2))])
+        if duration is not None and duration > 0.0:
+            cmd.extend(["-t", str(round(duration, 2))])
+        cmd.extend([
             "-i", str(video_path),
             "-vn",
             "-acodec", "pcm_s16le",
             "-ar", "16000",
             "-ac", "1",
             str(audio_path)
-        ]
+        ])
         res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return res.returncode == 0
 
-    def transcribe_with_word_timestamps(self, audio_path: Path) -> Tuple[List[Dict[str, Any]], float, float]:
+    def transcribe_with_word_timestamps(self, audio_path: Path, peak_offset: float = 60.0) -> Tuple[List[Dict[str, Any]], float, float]:
         """
-        Transcribes audio and returns word list and optimal snapped start/end boundaries.
+        Transcribes audio and returns word list and optimal snapped start/end boundaries centered around peak_offset.
         """
         model = self._get_model()
         state.col3_status = "TRANSCRIBING"
-        state.add_col3_log("Transcribing audio track with word-level precision...")
+        state.add_col3_log("Transcribing candidate audio track with word-level precision...")
 
         if model == "MOCK":
             # Fallback mock words for testing if whisper is not installed
+            s_start = max(0.0, peak_offset - 20.0)
             words = [
-                {"word": "BRO", "raw_word": "BRO", "start": 0.5, "end": 1.0, "probability": 0.99},
-                {"word": "YOU", "raw_word": "YOU", "start": 1.1, "end": 1.4, "probability": 0.99},
-                {"word": "SAW", "raw_word": "SAW", "start": 1.5, "end": 1.8, "probability": 0.98},
-                {"word": "THAT?!", "raw_word": "THAT?!", "start": 1.9, "end": 2.5, "probability": 0.99},
+                {"word": "BRO", "raw_word": "BRO", "start": s_start + 0.5, "end": s_start + 1.0, "probability": 0.99},
+                {"word": "YOU", "raw_word": "YOU", "start": s_start + 1.1, "end": s_start + 1.4, "probability": 0.99},
+                {"word": "SAW", "raw_word": "SAW", "start": s_start + 1.5, "end": s_start + 1.8, "probability": 0.98},
+                {"word": "THAT?!", "raw_word": "THAT?!", "start": s_start + 1.9, "end": s_start + 2.5, "probability": 0.99},
             ]
-            state.current_transcript = [{"start": 0.5, "end": 2.5, "text": "BRO YOU SAW THAT?!"}]
-            return words, 0.0, 30.0
+            state.current_transcript = [{"start": s_start + 0.5, "end": s_start + 2.5, "text": "BRO YOU SAW THAT?!"}]
+            return words, s_start, s_start + 45.0
 
         # Load audio directly into NumPy float32 to bypass PyAV metadata_errors bug
         audio_input = str(audio_path)
@@ -77,13 +84,13 @@ class SpeechTranscriber:
             state.add_col3_log(f"WAV read fallback: {str(e)}")
 
         # condition_on_previous_text=False prevents Whisper from repeating/duplicating sentences
-        # vad_filter=True removes background noise/silence hallucinations
+        # vad_filter=False ensures STT transcribes the entire 2-minute (120s) audio without dropping noisy/music/gaming sections
         segments, _ = model.transcribe(
             audio_input,
             word_timestamps=True,
             language="en",
             condition_on_previous_text=False,
-            vad_filter=True,
+            vad_filter=False,
             temperature=0.0
         )
 
@@ -128,8 +135,8 @@ class SpeechTranscriber:
         state.current_transcript = transcript_display
         state.add_col3_log(f"Transcribed {len(words)} words ({state.censored_count} words censored in text, max 4 words/row)")
 
-        # Snap boundaries to natural pauses
-        snapped_start, snapped_end = self._calculate_snapped_boundaries(words)
+        # Snap boundaries to natural pauses centered near peak_offset
+        snapped_start, snapped_end = self._calculate_snapped_boundaries(words, peak_offset=peak_offset)
         return words, snapped_start, snapped_end
 
     def _censor_text(self, text: str) -> Tuple[str, int]:
@@ -144,33 +151,35 @@ class SpeechTranscriber:
                 result = pattern.sub(replacement, result)
         return result, total_censored
 
-    def _calculate_snapped_boundaries(self, words: List[Dict[str, Any]]) -> Tuple[float, float]:
+    def _calculate_snapped_boundaries(self, words: List[Dict[str, Any]], peak_offset: float = 60.0) -> Tuple[float, float]:
         """
-        Finds natural speech pause boundaries so clip doesn't cut mid-sentence.
+        Finds natural speech pause boundaries centered on the peak moment (max 45-55s duration for YouTube Shorts).
         """
+        max_duration = min(55.0, float(settings.MAX_CLIP_DURATION))
         if not words:
-            return 0.0, settings.MAX_CLIP_DURATION
+            start = max(0.0, peak_offset - 22.0)
+            return start, start + max_duration
 
-        start_time = words[0]["start"]
-        max_duration = float(settings.MAX_CLIP_DURATION)
-        target_end = min(words[-1]["end"], start_time + max_duration)
+        # Target 22 seconds before peak and 23 seconds after peak
+        ideal_start = max(0.0, peak_offset - 22.0)
+        ideal_end = min(words[-1]["end"], ideal_start + max_duration)
 
-        # Look for pause > 0.3s or punctuation in the last 10 seconds of max duration
-        best_end = target_end
+        # Snap start to nearest word start near ideal_start
+        start_candidates = [w["start"] for w in words if abs(w["start"] - ideal_start) <= 8.0]
+        snapped_start = min(start_candidates, key=lambda s: abs(s - ideal_start)) if start_candidates else ideal_start
+
+        # Snap end to sentence end or pause near ideal_end (strict max 58s for Shorts safety)
+        max_end = snapped_start + 58.0
+        snapped_end = min(ideal_end, max_end)
+
         for i in range(len(words) - 1, 0, -1):
             w = words[i]
-            if w["end"] <= start_time + max_duration:
-                # Check if word ends with punctuation or followed by pause
+            if snapped_start + 25.0 <= w["end"] <= max_end:
                 has_punct = w["raw_word"].endswith(('.', '!', '?', ','))
-                if i < len(words) - 1:
-                    pause = words[i+1]["start"] - w["end"]
-                    if pause >= 0.3 or has_punct:
-                        best_end = w["end"] + 0.15
-                        break
-                elif has_punct:
-                    best_end = w["end"] + 0.15
+                if has_punct or (i < len(words) - 1 and words[i+1]["start"] - w["end"] >= 0.25):
+                    snapped_end = w["end"] + 0.15
                     break
 
-        return start_time, best_end
+        return round(snapped_start, 2), round(snapped_end, 2)
 
 transcriber = SpeechTranscriber()

@@ -4,7 +4,7 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 from backend.core.config import settings
 from backend.core.state import state
 
@@ -76,7 +76,6 @@ class StreamRollingBuffer:
                     "-f", "segment",
                     "-segment_time", "2",
                     "-segment_wrap", str(max_segments),
-                    "-reset_timestamps", "1",
                     segment_pattern
                 ]
 
@@ -106,35 +105,88 @@ class StreamRollingBuffer:
                 state.add_col1_log(f"Buffer error: {str(e)}. Retrying in 10s...")
                 await asyncio.sleep(10)
 
-    def extract_recent_segment(self, duration_sec: int, output_file: Path) -> bool:
+    def extract_recent_segment(
+        self,
+        duration_sec: int,
+        output_file: Path,
+        peak_timestamp: Optional[float] = None,
+        before_sec: float = 180.0,
+        after_sec: float = 60.0
+    ) -> Tuple[bool, float]:
         """
-        Concatenates the most recent `duration_sec` seconds from the rolling buffer.
+        Concatenates up to `duration_sec` (default 240s = 4 minutes: 3m before & 1m after peak)
+        from the rolling buffer, anchored directly to `peak_timestamp` so the peak moment is accurately
+        aligned regardless of when the user clicked Process.
+        Returns (success, peak_offset_in_clip_sec).
         """
         segments = sorted(list(self.buffer_dir.glob("*.ts")), key=lambda p: p.stat().st_mtime)
         if not segments:
-            return False
+            return False, before_sec
 
-        # Each segment is ~2s. Number of segments needed = ceil(duration_sec / 2) + 2 for safety
-        num_segs = min(len(segments), (duration_sec // 2) + 3)
-        selected_segs = segments[-num_segs:]
+        # Exclude the very last segment if it was modified within the last 0.5s (actively being written by ffmpeg)
+        now_ts = time.time()
+        completed_segments = [s for s in segments if (now_ts - s.stat().st_mtime) >= 0.4 and s.stat().st_size > 10000]
+        if not completed_segments:
+            completed_segments = segments
 
-        # Create ffmpeg concat file
-        concat_file = self.buffer_dir / "concat_list.txt"
-        with open(concat_file, "w") as f:
-            for s in selected_segs:
-                f.write(f"file '{s.resolve()}'\n")
+        # Compensate for ~4.5s chat reaction + HLS stream delay (chat reacts ~4-5s AFTER the visual event on stream)
+        REACTION_DELAY_COMPENSATION_SEC = 4.5
 
-        # Concat without re-encoding
-        cmd = [
-            "ffmpeg", "-y",
-            "-f", "concat",
-            "-safe", "0",
-            "-i", str(concat_file),
-            "-c", "copy",
-            str(output_file)
-        ]
-        res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        if concat_file.exists():
-            concat_file.unlink()
+        if peak_timestamp is not None:
+            actual_event_ts = peak_timestamp - REACTION_DELAY_COMPENSATION_SEC
+            win_start_ts = actual_event_ts - before_sec
+            win_end_ts = actual_event_ts + after_sec
+            window_segs = [s for s in completed_segments if win_start_ts <= s.stat().st_mtime <= (win_end_ts + 4.0)]
+            if len(window_segs) >= 10:
+                selected_segs = window_segs
+            else:
+                num_segs = (duration_sec // 2) + 2
+                selected_segs = completed_segments[-num_segs:] if len(completed_segments) >= num_segs else completed_segments
+        else:
+            num_segs = (duration_sec // 2) + 2
+            selected_segs = completed_segments[-num_segs:] if len(completed_segments) >= num_segs else completed_segments
 
-        return res.returncode == 0
+        # Compute exact peak offset inside the extracted video based on first selected segment's timestamp
+        first_seg_start_ts = selected_segs[0].stat().st_mtime - 2.0
+        last_seg_end_ts = selected_segs[-1].stat().st_mtime
+        approx_real_duration = max(4.0, round(last_seg_end_ts - first_seg_start_ts, 1))
+        if peak_timestamp is not None:
+            computed_peak_offset = max(2.0, min(approx_real_duration - 2.0, (peak_timestamp - REACTION_DELAY_COMPENSATION_SEC) - first_seg_start_ts))
+        else:
+            computed_peak_offset = approx_real_duration * 0.75
+
+        # Concatenate MPEG-TS segments at byte level first, then remux once to MP4.
+        # Because segments were created with -reset_timestamps 1, ffmpeg -f concat stops after a timestamp reset;
+        # byte-concatenating the .ts files and remuxing with +genpts+igndts preserves 100% of all segments cleanly!
+        merged_ts_path = self.buffer_dir / f"{output_file.stem}_merged.ts"
+        try:
+            with open(merged_ts_path, "wb") as out_ts:
+                for s in selected_segs:
+                    try:
+                        with open(s, "rb") as in_ts:
+                            shutil.copyfileobj(in_ts, out_ts, length=1024 * 1024)
+                    except Exception:
+                        pass
+
+            cmd = [
+                "ffmpeg", "-y",
+                "-fflags", "+genpts+igndts",
+                "-i", str(merged_ts_path),
+                "-t", str(duration_sec),
+                "-c", "copy",
+                "-avoid_negative_ts", "make_zero",
+                "-movflags", "+faststart",
+                str(output_file)
+            ]
+            res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        finally:
+            if merged_ts_path.exists():
+                try:
+                    merged_ts_path.unlink()
+                except Exception:
+                    pass
+
+        if res.returncode != 0 or not output_file.exists():
+            return False, computed_peak_offset
+
+        return True, round(computed_peak_offset, 1)

@@ -16,10 +16,13 @@ except ImportError:
 from backend.core.config import settings
 from backend.core.state import state
 from backend.core.events import manager
+from backend.core.scheduler import scheduler
 from backend.ingestion.twitch_irc import TwitchIRCClient
 from backend.ingestion.stream_buffer import StreamRollingBuffer
 from backend.pipeline.peak_detector import PeakDetector
 from backend.pipeline.clip_orchestrator import ClipOrchestrator
+from backend.pipeline.facecam_cropper import facecam_cropper
+from backend.uploader.youtube import uploader
 
 # Global services
 stream_buffer = StreamRollingBuffer(settings.TWITCH_CHANNEL)
@@ -38,12 +41,17 @@ async def background_tick_loop():
             if state.is_monitoring:
                 peak_detector.tick()
 
+                # Capture ONE frame once for Column 2 so it lasts the entire time without ever re-updating
+                if not state.col2_has_preview and not state.layout_locked and not state.is_processing:
+                    segments = sorted(settings.BUFFER_DIR.glob("seg_*.ts"), key=lambda x: x.stat().st_mtime)
+                    if segments and segments[-1].stat().st_size > 30000:
+                        await asyncio.to_thread(facecam_cropper.refresh_live_stream_frame)
+
                 # Auto-process queued peaks if auto_process is toggled ON and no clip is active
                 if state.auto_process and not state.is_processing and not orchestrator.is_processing and state.active_clip_id is None:
                     ready_peak = next((p for p in state.detected_peaks if p.get("status") == "READY"), None)
                     if ready_peak:
                         ready_peak["status"] = "PROCESSING"
-                        state.is_processing = True
                         state.add_col1_log(f"Auto-Processing queued peak: {ready_peak['peak_id']}")
                         asyncio.create_task(orchestrator.process_peak_event(ready_peak))
 
@@ -58,10 +66,41 @@ async def background_tick_loop():
             pass
         await asyncio.sleep(0.5)
 
+def _cleanup_orphan_clip_files():
+    """Purges any old orphaned clip files on startup to keep SSD clean."""
+    for d in [settings.CLIPS_DIR, settings.BUFFER_DIR]:
+        for pattern in ["Clip_*", "clip_*"]:
+            for f in d.glob(pattern):
+                try:
+                    f.unlink()
+                except Exception:
+                    pass
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup
-    state.add_col1_log("AutoClipper background engine starting...")
+    # Startup: clean orphaned clips & detect active YT account + streamer
+    _cleanup_orphan_clip_files()
+    active_acc = uploader.detect_active_account()
+    if active_acc:
+        mapped_streamer = uploader.get_streamer_for_account(active_acc)
+        if mapped_streamer:
+            settings.TWITCH_CHANNEL = mapped_streamer
+            stream_buffer.channel = mapped_streamer
+            twitch_irc.channel = mapped_streamer
+        state.add_col1_log(f"Active YouTube account: {active_acc} -> Tracking Twitch streamer #{settings.TWITCH_CHANNEL}")
+    else:
+        state.add_col1_log("AutoClipper background engine starting...")
+
+    # Load saved Red & Blue boxes for the tracked streamer if present
+    saved_fb, saved_gb = facecam_cropper.load_streamer_boxes(settings.TWITCH_CHANNEL)
+    if saved_fb and saved_gb:
+        state.current_facecam_box = saved_fb
+        state.current_gameplay_box = saved_gb
+        state.layout_locked = True
+        state.col2_status = "LOCKED"
+        state.facecam_rule_applied = "SAVED STREAMER PROFILE"
+        state.add_col2_log(f"Loaded saved Red/Blue crop boxes for #{settings.TWITCH_CHANNEL}.")
+
     await stream_buffer.start()
     await twitch_irc.start()
     tick_task = asyncio.create_task(background_tick_loop())
@@ -132,6 +171,14 @@ async def toggle_auto_upload(payload: dict = None):
     settings.AUTO_UPLOAD_ENABLED = state.auto_upload
     status_str = "ENABLED" if state.auto_upload else "DISABLED"
     state.add_col3_log(f"Auto-Upload toggled {status_str} from navbar.")
+
+    # If user just toggled Auto-Upload ON while a clip is already active, auto-create (if needed) and upload it
+    if state.auto_upload and state.active_clip_id and state.active_clip_id in state.clips:
+        active_clip = state.clips[state.active_clip_id]
+        if active_clip.get("status") in ["PENDING_REVIEW", "STUDIO_EDITING"]:
+            state.add_col3_log(f"Auto-Upload triggered for active clip {state.active_clip_id}...")
+            asyncio.create_task(orchestrator.dispatch_upload(state.active_clip_id, immediate=False))
+
     await manager.broadcast(state.to_dict())
     return {"auto_upload": state.auto_upload}
 
@@ -167,24 +214,118 @@ async def set_facecam_mode(payload: dict):
         "rule_applied": state.facecam_rule_applied
     }
 
+@app.post("/api/facecam/update_boxes")
+async def update_crop_boxes(payload: dict):
+    face_box = payload.get("face_box")
+    game_box = payload.get("game_box")
+    if not face_box or not game_box:
+        raise HTTPException(status_code=400, detail="Missing face_box or game_box coordinates")
+
+    try:
+        crop_data = facecam_cropper.update_boxes_from_full_frame(face_box, game_box)
+        state.facecam_rule_applied = "CUSTOM LOCKED BOXES"
+        state.using_fallback = False
+        state.layout_locked = True
+
+        if state.active_clip_id and state.active_clip_id in state.clips:
+            state.clips[state.active_clip_id]["crop_data"] = crop_data
+            state.clips[state.active_clip_id]["base_face_box"] = crop_data["face_box"]
+
+        fb = crop_data['face_box']
+        gb = crop_data['game_crop']
+        state.add_col2_log(
+            f"Live Crop Boxes Applied & Locked: Red Face ({fb['w']}x{fb['h']} at {fb['x']},{fb['y']}), "
+            f"Blue Game ({gb['w']}x{gb['h']} at {gb['x']},{gb['y']})."
+        )
+        await manager.broadcast(state.to_dict())
+        return {"status": "UPDATED", "crop_data": crop_data}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/facecam/reset_ai")
+async def reset_facecam_to_ai():
+    try:
+        crop_data = await asyncio.to_thread(facecam_cropper.reset_to_ai_guess)
+        if state.active_clip_id and state.active_clip_id in state.clips:
+            state.clips[state.active_clip_id]["crop_data"] = crop_data
+            state.clips[state.active_clip_id]["base_face_box"] = crop_data["face_box"]
+        state.col2_status = "LOCKED"
+        state.add_col2_log("Re-ran 1-take AI layout guess and locked boxes.")
+        await manager.broadcast(state.to_dict())
+        return {"status": "RESET", "crop_data": crop_data, "col2": state.to_dict()["col2"]}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/facecam/init_preview")
+async def init_facecam_preview():
+    try:
+        if not state.layout_locked or not state.col2_has_preview:
+            crop_data = await asyncio.to_thread(facecam_cropper.reset_to_ai_guess)
+            state.col2_status = "LOCKED"
+        else:
+            crop_data = {
+                "face_box": state.current_facecam_box,
+                "game_crop": state.current_gameplay_box
+            }
+        await manager.broadcast(state.to_dict())
+        return {"status": "READY", "crop_data": crop_data, "col2": state.to_dict()["col2"]}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/api/youtube/status")
 async def get_youtube_status():
-    from backend.uploader.youtube import uploader
     is_authed = uploader.is_authenticated()
     return {
         "authenticated": is_authed,
-        "status": "CONNECTED" if is_authed else "NOT CONNECTED"
+        "status": state.youtube_channel if is_authed else "NOT CONNECTED"
     }
+
+@app.get("/api/youtube/accounts")
+async def get_youtube_accounts():
+    accounts = uploader.get_available_accounts()
+    return {
+        "accounts": accounts,
+        "active_channel": state.youtube_channel,
+        "tracked_streamer": settings.TWITCH_CHANNEL
+    }
+
+@app.get("/api/youtube/channel")
+async def get_youtube_channel():
+    accounts = uploader.get_available_accounts()
+    active_acc = next((a for a in accounts if a.get("is_active")), None)
+    channel_title = active_acc["name"] if active_acc else state.youtube_channel
+    return {
+        "authenticated": uploader.is_authenticated(),
+        "channel_title": channel_title,
+        "streamer": settings.TWITCH_CHANNEL
+    }
+
+@app.post("/api/youtube/switch")
+async def switch_youtube_account(payload: dict):
+    account_id = payload.get("account_id", "").strip()
+    if not account_id:
+        raise HTTPException(status_code=400, detail="Missing account_id")
+
+    try:
+        res = uploader.switch_account(account_id)
+        target_streamer = res.get("streamer")
+        if target_streamer and target_streamer.lower() != settings.TWITCH_CHANNEL.lower():
+            await switch_channel({"channel": target_streamer})
+        else:
+            await manager.broadcast(state.to_dict())
+        return res
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/youtube/reload")
 async def reload_youtube_auth():
-    from backend.uploader.youtube import uploader
     try:
         uploader.reload_credentials()
         is_authed = uploader.is_authenticated()
     except Exception:
         is_authed = False
-    state.youtube_channel = "CONNECTED" if is_authed else "NOT CONNECTED"
+    active_acc = uploader.detect_active_account()
+    state.youtube_channel = active_acc or ("CONNECTED" if is_authed else "NOT CONNECTED")
     state.add_col3_log(f"Reloaded YouTube credentials. Status: {state.youtube_channel}")
     await manager.broadcast(state.to_dict())
     return {"status": "RELOADED", "authenticated": is_authed}
@@ -197,14 +338,14 @@ async def get_clips():
 async def get_clip_details(clip_id: str):
     clip = state.clips.get(clip_id)
     if not clip:
-        raise HTTPException(status_code=404, detail="Clip not found")
+        return {"clip_id": clip_id, "status": "DISCARDED", "message": "Clip has been processed and discarded from SSD."}
     return clip
 
 @app.post("/api/clips/{clip_id}/metadata")
 async def update_clip_metadata(clip_id: str, payload: dict):
     clip = state.clips.get(clip_id)
     if not clip:
-        raise HTTPException(status_code=404, detail="Clip not found")
+        return {"status": "DISCARDED", "message": "Clip already processed."}
 
     if "title" in payload and payload["title"] is not None:
         clip["title"] = str(payload["title"]).strip()
@@ -218,7 +359,9 @@ async def update_clip_metadata(clip_id: str, payload: dict):
 async def approve_clip(clip_id: str):
     clip = state.clips.get(clip_id)
     if not clip:
-        raise HTTPException(status_code=404, detail="Clip not found")
+        return {"status": "ALREADY_PROCESSED", "message": "Clip has already been approved and discarded."}
+    if clip.get("status") in ["UPLOADING", "UPLOADED"]:
+        return {"status": clip["status"], "youtube_url": clip.get("youtube_url")}
     clip["status"] = "APPROVED"
     asyncio.create_task(orchestrator.dispatch_upload(clip_id, immediate=False))
     return {"status": "APPROVED", "clip_id": clip_id}
@@ -227,15 +370,95 @@ async def approve_clip(clip_id: str):
 async def upload_clip_now(clip_id: str):
     clip = state.clips.get(clip_id)
     if not clip:
-        raise HTTPException(status_code=404, detail="Clip not found")
+        return {"status": "ALREADY_PROCESSED", "message": "Clip has already been uploaded and discarded."}
+    if clip.get("status") in ["UPLOADING", "UPLOADED"]:
+        return {"status": clip["status"], "youtube_url": clip.get("youtube_url")}
     clip["status"] = "UPLOADING"
     asyncio.create_task(orchestrator.dispatch_upload(clip_id, immediate=True))
     return {"status": "UPLOADING", "clip_id": clip_id}
+
+@app.post("/api/clips/{clip_id}/create")
+async def create_clip_from_studio_endpoint(clip_id: str, payload: dict):
+    start_time = float(payload.get("start_time", 35.0))
+    end_time = float(payload.get("end_time", 80.0))
+    face_box = payload.get("face_box")
+    game_box = payload.get("game_box")
+    custom_title = payload.get("title")
+
+    if end_time <= start_time:
+        raise HTTPException(status_code=400, detail="End time must be greater than start time")
+    if (end_time - start_time) > 60.0:
+        end_time = start_time + 60.0
+
+    try:
+        updated_clip = await orchestrator.create_clip_from_studio(
+            clip_id=clip_id,
+            start_time=start_time,
+            end_time=end_time,
+            face_box=face_box,
+            game_box=game_box,
+            custom_title=custom_title
+        )
+        await manager.broadcast(state.to_dict())
+        return {"status": "SUCCESS", "clip": updated_clip}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/clips/{clip_id}/build_preview")
+async def build_clip_2min_preview(clip_id: str):
+    clip = state.clips.get(clip_id)
+    if not clip:
+        raise HTTPException(status_code=404, detail="Clip not found")
+
+    try:
+        updated_clip = await orchestrator.create_clip_from_studio(
+            clip_id=clip_id,
+            start_time=float(clip.get("trim_start", 35.0)),
+            end_time=float(clip.get("trim_end", 80.0)),
+            custom_title=clip.get("title")
+        )
+        await manager.broadcast(state.to_dict())
+        return {"status": "SUCCESS", "clip": updated_clip}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/clips/{clip_id}/retrim")
+async def retrim_clip_endpoint(clip_id: str, payload: dict):
+    start_time = float(payload.get("start_time", 0.0))
+    end_time = float(payload.get("end_time", 45.0))
+    zoom = float(payload.get("facecam_zoom", 1.0))
+    pan_x = int(payload.get("facecam_pan_x", 0))
+    pan_y = int(payload.get("facecam_pan_y", 0))
+    custom_title = payload.get("title")
+
+    if end_time <= start_time:
+        raise HTTPException(status_code=400, detail="End time must be greater than start time")
+
+    # Automatically cap to 60 seconds max for YouTube Shorts
+    if (end_time - start_time) > 60.0:
+        end_time = start_time + 60.0
+
+    try:
+        updated_clip = await orchestrator.retrim_clip(
+            clip_id=clip_id,
+            new_start=start_time,
+            new_end=end_time,
+            facecam_zoom=zoom,
+            facecam_pan_x=pan_x,
+            facecam_pan_y=pan_y,
+            custom_title=custom_title
+        )
+        await manager.broadcast(state.to_dict())
+        return {"status": "SUCCESS", "clip": updated_clip}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/clips/{clip_id}/reject")
 @app.delete("/api/clips/{clip_id}")
 async def reject_clip(clip_id: str):
     orchestrator.reject_clip(clip_id)
+    state.active_clip_id = None
+    state.is_processing = False
     state.reset_columns_2_and_3()
     await manager.broadcast(state.to_dict())
     return {"status": "REJECTED", "clip_id": clip_id}
@@ -254,7 +477,16 @@ async def generate_clip_ai(clip_id: str):
     if not clip:
         raise HTTPException(status_code=404, detail="Clip not found")
 
-    transcript = clip.get("transcript_text", "")
+    words = clip.get("all_words", [])
+    t_start = float(clip.get("trim_start", 0.0))
+    t_end = float(clip.get("trim_end", 120.0))
+    window_words = [
+        w for w in words
+        if float(w.get("end", 0)) >= t_start and float(w.get("start", 0)) <= t_end
+    ]
+    transcript = " ".join(w.get("word", "") for w in (window_words or words)).strip()
+    if not transcript:
+        transcript = clip.get("transcript_text", "")
     if not transcript and state.current_transcript:
         transcript = " ".join(t.get("text", "") for t in state.current_transcript)
     if not transcript:
@@ -311,7 +543,10 @@ def save_streamer_profile(channel: str, profile: dict):
                 data = json.load(f)
         except Exception:
             data = {}
-    data[channel.lower()] = profile
+    ch = channel.lower()
+    existing = data.get(ch, {}) if isinstance(data.get(ch), dict) else {}
+    existing.update(profile)
+    data[ch] = existing
     try:
         with open(PROFILES_FILE, "w") as f:
             json.dump(data, f, indent=2)
@@ -379,8 +614,17 @@ async def switch_channel(payload: dict):
     # Clear old stream buffer segments from disk
     stream_buffer.clear_buffer()
 
-    # Load custom profile for this streamer if saved, else default to auto dynamic
+    # Load custom profile & saved Red/Blue boxes for this streamer if saved
     profile = load_streamer_profile(new_channel)
+    saved_fb, saved_gb = facecam_cropper.load_streamer_boxes(new_channel)
+    if saved_fb and saved_gb:
+        state.current_facecam_box = saved_fb
+        state.current_gameplay_box = saved_gb
+        state.layout_locked = True
+        state.col2_status = "LOCKED"
+        state.facecam_rule_applied = "SAVED STREAMER PROFILE"
+        state.add_col2_log(f"Loaded saved Red/Blue crop boxes for #{new_channel}.")
+
     if profile:
         state.peak_dynamic_mode = profile.get("dynamic_mode", True)
         state.peak_streamer_tier = profile.get("streamer_tier", "AUTO")
@@ -437,7 +681,34 @@ async def process_specific_peak(peak_id: str):
 async def update_transcript(payload: dict):
     new_transcript = payload.get("transcript", [])
     state.current_transcript = new_transcript
-    state.add_col3_log(f"Transcript updated by user ({len(new_transcript)} lines).")
+
+    # Also update active clip's all_words so any cut from the 2-minute clip uses the edited STT text
+    if state.active_clip_id and state.active_clip_id in state.clips:
+        clip = state.clips[state.active_clip_id]
+        updated_words = []
+        for row in new_transcript:
+            r_start = float(row.get("start", 0.0))
+            r_end = float(row.get("end", r_start + 1.0))
+            tokens = str(row.get("text", "")).strip().split()
+            if not tokens:
+                continue
+            step = max(0.05, (r_end - r_start) / len(tokens))
+            for idx, tok in enumerate(tokens):
+                w_s = round(r_start + idx * step, 2)
+                w_e = round(min(r_end, w_s + step), 2)
+                updated_words.append({
+                    "word": tok,
+                    "raw_word": tok,
+                    "start": w_s,
+                    "end": max(w_s + 0.05, w_e),
+                    "probability": 1.0
+                })
+        if updated_words:
+            clip["all_words"] = updated_words
+            clip["transcript_text"] = " ".join(w["word"] for w in updated_words)
+
+    state.add_col3_log(f"Transcript updated by user ({len(new_transcript)} lines synced to 2-minute STT).")
+    await manager.broadcast(state.to_dict())
     return {"status": "UPDATED"}
 
 @app.post("/api/trigger_test_peak")
@@ -465,6 +736,10 @@ async def trigger_test_peak():
 async def favicon():
     from fastapi.responses import Response
     return Response(status_code=204)
+
+@app.get("/.well-known/appspecific/com.chrome.devtools.json")
+async def chrome_devtools_well_known():
+    return {}
 
 # Serve compiled frontend SPA at root AFTER all API and WebSocket routes
 dist_dir = settings.BASE_DIR / "frontend" / "dist"

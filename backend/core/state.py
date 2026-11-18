@@ -57,6 +57,9 @@ class AppState:
         self.col2_status: str = "IDLE" # IDLE, DETECTING, LOCKED, CROPPING, OK
         self.last_known_facecam: Optional[Dict[str, int]] = None # {'x': 120, 'y': 40, 'w': 320, 'h': 240}
         self.current_facecam_box: Optional[Dict[str, int]] = None
+        self.current_gameplay_box: Optional[Dict[str, int]] = None
+        self.layout_locked: bool = False
+        self.frame_dimensions: Dict[str, int] = {"w": 1280, "h": 720}
         self.facecam_mode: str = "AUTO" # AUTO, BACKGROUND, NO_BACKGROUND
         self.facecam_has_background: bool = True
         self.facecam_rule_applied: str = "RULE 1: FIT BOX" # "RULE 1: FIT BOX" or "RULE 2: 50% FACE"
@@ -149,6 +152,8 @@ class AppState:
         # Column 2: Facecam & Framing State
         self.col2_status = "IDLE"
         self.current_facecam_box = None
+        self.current_gameplay_box = None
+        self.layout_locked = False
         self.last_known_facecam = None
         self.edge_confidence = 0.0
         self.using_fallback = False
@@ -168,7 +173,7 @@ class AppState:
         self.is_processing = False
 
         # Clean preview image files from disk
-        for img_path in [settings.CLIPS_DIR / "preview_facecam.jpg", settings.CLIPS_DIR / "preview_gameplay.jpg"]:
+        for img_path in [settings.CLIPS_DIR / "preview_facecam.jpg", settings.CLIPS_DIR / "preview_gameplay.jpg", settings.CLIPS_DIR / "preview_full_frame.jpg"]:
             try:
                 if img_path.exists():
                     img_path.unlink()
@@ -177,18 +182,31 @@ class AppState:
 
     def reset_columns_2_and_3(self):
         """
-        Completely clears Columns 2 and 3 back to clean IDLE state after a clip is
-        discarded or deleted, waiting for the user to process the next peak.
+        Resets Column 3 to clean IDLE state after a clip is discarded or uploaded.
+        Preserves Column 2's locked 1-take layout & custom Red/Blue crop boxes so they never change back.
         """
         from backend.core.config import settings
-        self.col2_status = "IDLE"
-        self.current_facecam_box = None
-        self.last_known_facecam = None
-        self.edge_confidence = 0.0
-        self.using_fallback = False
-        self.col2_has_preview = False
-        self.preview_version += 1
-        self.col2_logs = [f"[{datetime.now().strftime('%H:%M:%S')}] State reset. Waiting for peak selection."]
+        if self.layout_locked and self.current_facecam_box:
+            self.col2_status = "LOCKED"
+            self.col2_logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] Layout boxes locked & preserved for next clip.")
+            if len(self.col2_logs) > 50:
+                self.col2_logs.pop(0)
+        else:
+            self.col2_status = "IDLE"
+            self.current_facecam_box = None
+            self.current_gameplay_box = None
+            self.last_known_facecam = None
+            self.edge_confidence = 0.0
+            self.using_fallback = False
+            self.col2_has_preview = False
+            self.preview_version += 1
+            self.col2_logs = [f"[{datetime.now().strftime('%H:%M:%S')}] State reset. Waiting for peak selection."]
+            for img_path in [settings.CLIPS_DIR / "preview_facecam.jpg", settings.CLIPS_DIR / "preview_gameplay.jpg", settings.CLIPS_DIR / "preview_full_frame.jpg"]:
+                try:
+                    if img_path.exists():
+                        img_path.unlink()
+                except Exception:
+                    pass
 
         self.col3_status = "IDLE"
         self.current_transcript = []
@@ -196,14 +214,6 @@ class AppState:
         self.last_render_time_sec = 0.0
         self.col3_logs = [f"[{datetime.now().strftime('%H:%M:%S')}] State reset. Ready for next clip."]
         self.active_clip_id = None
-
-        # Clean preview image files so browser doesn't show previous clip's frame
-        for img_path in [settings.CLIPS_DIR / "preview_facecam.jpg", settings.CLIPS_DIR / "preview_gameplay.jpg"]:
-            try:
-                if img_path.exists():
-                    img_path.unlink()
-            except Exception:
-                pass
 
     def check_ai_rate_limit(self, max_per_min: int, max_per_day: int) -> bool:
         """Returns True if AI call is permitted under current limits."""
@@ -267,7 +277,7 @@ class AppState:
             },
             "all_processes_ok": (
                 self.col1_status in ["MONITORING", "READY", "OK"] and
-                self.col2_status in ["READY", "OK", "IDLE"] and
+                self.col2_status in ["READY", "OK", "IDLE", "LOCKED"] and
                 self.col3_status in ["COMPLETED", "OK", "IDLE"] and
                 self.active_clip_id is not None
             ),
@@ -283,21 +293,25 @@ class AppState:
             "col2": {
                 "status": self.col2_status,
                 "current_facecam_box": self.current_facecam_box,
+                "current_gameplay_box": self.current_gameplay_box,
+                "layout_locked": self.layout_locked,
+                "frame_dimensions": self.frame_dimensions,
                 "last_known_facecam": self.last_known_facecam,
                 "facecam_mode": self.facecam_mode,
                 "has_background": self.facecam_has_background,
                 "rule_applied": self.facecam_rule_applied,
                 "edge_confidence": round(self.edge_confidence, 2),
                 "using_fallback": self.using_fallback,
-                "has_preview": self.col2_has_preview,
+                "has_preview": bool(self.col2_has_preview and (settings.CLIPS_DIR / "preview_facecam.jpg").exists()),
                 "preview_version": self.preview_version,
-                "facecam_preview_url": "/media/preview_facecam.jpg" if self.col2_has_preview else None,
-                "gameplay_preview_url": "/media/preview_gameplay.jpg" if self.col2_has_preview else None,
+                "facecam_preview_url": "/media/preview_facecam.jpg" if (self.col2_has_preview and (settings.CLIPS_DIR / "preview_facecam.jpg").exists()) else None,
+                "gameplay_preview_url": "/media/preview_gameplay.jpg" if (self.col2_has_preview and (settings.CLIPS_DIR / "preview_gameplay.jpg").exists()) else None,
+                "full_frame_preview_url": "/media/preview_full_frame.jpg" if (self.col2_has_preview and (settings.CLIPS_DIR / "preview_full_frame.jpg").exists()) else None,
                 "logs": self.col2_logs[-15:]
             },
             "col3": {
                 "status": self.col3_status,
-                "current_transcript": self.current_transcript[-10:],
+                "current_transcript": self.current_transcript,
                 "censored_count": self.censored_count,
                 "last_render_time_sec": round(self.last_render_time_sec, 1),
                 "logs": self.col3_logs[-15:]

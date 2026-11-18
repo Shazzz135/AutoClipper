@@ -1,13 +1,15 @@
 import cv2
+import json
 import numpy as np
 import subprocess
 from pathlib import Path
-from typing import Dict, Tuple, Optional, List
+from typing import Dict, Tuple, Optional, List, Any
 from backend.core.config import settings
 from backend.core.state import state
 
 # Path to YuNet ONNX deep learning face detector model
 YUNET_MODEL_PATH = settings.BASE_DIR / "backend" / "models" / "face_detection_yunet.onnx"
+PROFILES_FILE = settings.BASE_DIR / "config" / "streamer_profiles.json"
 
 class FacecamCropper:
     def __init__(self):
@@ -30,100 +32,140 @@ class FacecamCropper:
             except Exception as e:
                 print("YuNet init error:", e)
 
-    def analyze_and_compute_crops(self, video_path: Path) -> Dict[str, str]:
-        """
-        Samples keyframes from the video, finds the facecam box,
-        and computes FFmpeg crop/scale filter strings for 40/60 vertical composition.
-        Also exports preview crop images for the dashboard.
-        """
-        state.col2_status = "DETECTING"
-        state.add_col2_log(f"Analyzing keyframes from candidate clip: {video_path.name}")
+    def load_streamer_boxes(self, channel: Optional[str] = None) -> Tuple[Optional[Dict[str, int]], Optional[Dict[str, int]]]:
+        """Loads saved Red (face_box) and Blue (game_box) coordinates for the specified streamer from disk."""
+        ch = (channel or settings.TWITCH_CHANNEL or "").strip().lower().lstrip("#")
+        if not ch or not PROFILES_FILE.exists():
+            return None, None
+        try:
+            with open(PROFILES_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            prof = data.get(ch, {})
+            fb = prof.get("face_box")
+            gb = prof.get("game_box")
+            if fb and gb and fb.get("w", 0) > 0 and gb.get("w", 0) > 0:
+                return fb, gb
+        except Exception:
+            pass
+        return None, None
 
+    def save_streamer_boxes(self, face_box: Dict[str, int], game_box: Dict[str, int], channel: Optional[str] = None):
+        """Persists Red (face_box) and Blue (game_box) coordinates for the streamer to disk."""
+        ch = (channel or settings.TWITCH_CHANNEL or "").strip().lower().lstrip("#")
+        if not ch:
+            return
+        PROFILES_FILE.parent.mkdir(parents=True, exist_ok=True)
+        data = {}
+        if PROFILES_FILE.exists():
+            try:
+                with open(PROFILES_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except Exception:
+                data = {}
+        if ch not in data or not isinstance(data[ch], dict):
+            data[ch] = {}
+        data[ch]["face_box"] = face_box
+        data[ch]["game_box"] = game_box
+        try:
+            with open(PROFILES_FILE, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            print("Failed to save streamer boxes:", e)
+
+    def analyze_and_compute_crops(self, video_path: Path, force_redetect: bool = False) -> Dict[str, Any]:
+        """
+        Performs a single 1-take guess of the streamer's facecam & gameplay layout on the first run,
+        then locks it so user adjustments to the Red and Blue boxes are never overwritten or changed back.
+        """
         orig_w, orig_h = 1280, 720
         temp_frame_path = settings.BUFFER_DIR / "temp_detect_frame.jpg"
-
-        # Use FFmpeg to reliably extract test frames across the video
-        detected_boxes = []
         best_frame = None
-        best_conf = 0.0
 
-        for seek_sec in [1, 2, 4]:
-            cmd = [
-                "ffmpeg", "-y",
-                "-ss", str(seek_sec),
-                "-i", str(video_path),
-                "-frames:v", "1",
-                "-update", "1",
-                str(temp_frame_path)
-            ]
-            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # Extract 1 representative frame from the video
+        for seek_sec in [2, 1, 0]:
+            try:
+                cmd = [
+                    "ffmpeg", "-y",
+                    "-ss", str(seek_sec),
+                    "-i", str(video_path),
+                    "-frames:v", "1",
+                    "-update", "1",
+                    str(temp_frame_path)
+                ]
+                subprocess.run(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+                if temp_frame_path.exists():
+                    frame = cv2.imread(str(temp_frame_path))
+                    if frame is not None:
+                        best_frame = frame.copy()
+                        orig_h, orig_w, _ = best_frame.shape
+                        break
+            except Exception:
+                pass
 
-            if not temp_frame_path.exists():
-                continue
-
-            frame = cv2.imread(str(temp_frame_path))
-            if frame is None:
-                continue
-
-            orig_h, orig_w, _ = frame.shape
-            face_result = self._detect_face_in_frame(frame)
-
-            if face_result:
-                left, top, fw, fh, conf = face_result
-                cam_box, rule_name = self._auto_expand_facecam_box(frame, left, top, fw, fh, orig_w, orig_h)
-                detected_boxes.append((cam_box, conf, fh, rule_name))
-                if conf > best_conf:
-                    best_conf = conf
-                    best_frame = frame.copy()
-
-        # Clean up temp detect frame
         if temp_frame_path.exists():
             try:
                 temp_frame_path.unlink()
             except Exception:
                 pass
 
-        if detected_boxes:
-            # Pick the highest confidence detected box
-            detected_boxes.sort(key=lambda x: x[1], reverse=True)
-            box, conf, fh, rule_name = detected_boxes[0]
+        # Check if streamer already has saved Red/Blue boxes on disk
+        if not state.layout_locked and not force_redetect:
+            saved_fb, saved_gb = self.load_streamer_boxes(settings.TWITCH_CHANNEL)
+            if saved_fb and saved_gb:
+                state.current_facecam_box = saved_fb
+                state.current_gameplay_box = saved_gb
+                state.layout_locked = True
+                state.facecam_rule_applied = "SAVED STREAMER PROFILE"
+                state.add_col2_log(f"Loaded saved Red/Blue boxes for #{settings.TWITCH_CHANNEL} from profile.")
 
+        # If layout is already locked (from saved streamer profile, 1-take guess, or user Red/Blue box edit), NEVER change it or the preview frame back
+        if state.layout_locked and state.current_facecam_box and state.current_gameplay_box and not force_redetect:
+            crop_data = self.compute_custom_crop(state.current_facecam_box, state.current_gameplay_box, orig_w, orig_h)
+            if not state.col2_has_preview and best_frame is not None:
+                self._save_crop_previews(best_frame, crop_data["face_box"], crop_data["game_crop"])
+            state.col2_status = "LOCKED"
+            return crop_data
+
+        # Otherwise: Perform ONE take to guess the initial layout, then lock it
+        state.col2_status = "DETECTING"
+        state.add_col2_log(f"Running 1-take initial layout guess on: {video_path.name}")
+
+        face_result = self._detect_face_in_frame(best_frame) if best_frame is not None else None
+
+        if face_result and best_frame is not None:
+            left, top, fw, fh, conf = face_result
+            box, rule_name = self._auto_expand_facecam_box(best_frame, left, top, fw, fh, orig_w, orig_h)
             state.current_facecam_box = box
             state.last_known_facecam = box
             state.using_fallback = False
             state.edge_confidence = float(conf)
-            state.col2_status = "LOCKED"
             state.facecam_rule_applied = rule_name
-            state.add_col2_log(f"Facecam locked: {rule_name} at ({box['x']}, {box['y']}), size {box['w']}x{box['h']} (conf: {conf:.2f})")
+            state.add_col2_log(f"1-Take layout guessed & locked: {rule_name} at ({box['x']}, {box['y']}) {box['w']}x{box['h']}")
         else:
-            # Kai / Jynxzi not visible in sampled frames -> use last known position if available
             if state.last_known_facecam:
                 box = state.last_known_facecam
-                state.current_facecam_box = box
-                state.using_fallback = True
-                state.edge_confidence = 0.70
-                state.col2_status = "FALLBACK_LOCKED"
-                state.add_col2_log(f"No face detected in frames; using last known box: ({box['x']}, {box['y']})")
             else:
-                state.using_fallback = True
-                state.col2_status = "DEFAULT_CENTER"
-                state.add_col2_log("No face detected. Using bottom-left facecam fallback.")
-                # Bottom-left facecam default (common for streamers like Jynxzi)
                 box = {
                     'x': int(orig_w * 0.05),
                     'y': int(orig_h * 0.55),
                     'w': int(orig_w * 0.32),
                     'h': int(orig_h * 0.40)
                 }
+            state.current_facecam_box = box
+            state.last_known_facecam = box
+            state.using_fallback = True
+            state.edge_confidence = 0.75
+            state.add_col2_log(f"1-Take fallback layout guessed & locked at ({box['x']}, {box['y']}). Adjust Red/Blue boxes if needed.")
 
-        # Generate crop filters
         filter_data = self._generate_filter_complex(box, orig_w, orig_h)
+        state.current_gameplay_box = filter_data["game_crop"]
+        state.layout_locked = True
+        state.col2_status = "LOCKED"
+        self.save_streamer_boxes(box, filter_data["game_crop"], settings.TWITCH_CHANNEL)
 
-        # Generate preview images for the dashboard
         if best_frame is not None:
             self._save_crop_previews(best_frame, box, filter_data["game_crop"])
 
-        state.col2_status = "OK"
         return filter_data
 
     def _detect_face_in_frame(self, frame: np.ndarray) -> Optional[Tuple[int, int, int, int, float]]:
@@ -395,6 +437,56 @@ class FacecamCropper:
         state.facecam_rule_applied = rule_applied
         return box, rule_applied
 
+    def compute_adjusted_crop(
+        self,
+        base_face_box: Dict[str, int],
+        zoom: float = 1.0,
+        pan_x: int = 0,
+        pan_y: int = 0,
+        orig_w: int = 1280,
+        orig_h: int = 720
+    ) -> Dict[str, Any]:
+        """
+        Adjusts the facecam crop box based on user zoom (0.7x to 2.5x) and pan offsets.
+        Re-computes FFmpeg filter complex for 40/60 vertical composition.
+        """
+        zoom = max(0.5, min(3.0, float(zoom)))
+        bx = base_face_box.get('x', 0)
+        by = base_face_box.get('y', 0)
+        bw = base_face_box.get('w', 400)
+        bh = base_face_box.get('h', 284)
+
+        # Center point with pan offset
+        cx = bx + bw // 2 + int(pan_x)
+        cy = by + bh // 2 + int(pan_y)
+
+        # Scale crop box by zoom (zoom > 1.0 means zoom in / tighter crop)
+        target_aspect = self.target_face_w / self.target_face_h
+        new_w = int(bw / zoom)
+        new_h = int(new_w / target_aspect)
+
+        # Clamp crop dimensions within canvas
+        new_w = min(orig_w, max(120, new_w))
+        new_h = min(orig_h, max(int(120 / target_aspect), new_h))
+
+        # Clamp position within canvas
+        new_x = max(0, min(orig_w - new_w, cx - new_w // 2))
+        new_y = max(0, min(orig_h - new_h, cy - new_h // 2))
+
+        # Even coordinates for FFmpeg
+        w = new_w - (new_w % 2)
+        h = new_h - (new_h % 2)
+        x = new_x - (new_x % 2)
+        y = new_y - (new_y % 2)
+
+        adjusted_box = {'x': x, 'y': y, 'w': w, 'h': h}
+        crop_data = self._generate_filter_complex(adjusted_box, orig_w, orig_h)
+        crop_data["adjusted_box"] = adjusted_box
+        crop_data["zoom"] = zoom
+        crop_data["pan_x"] = pan_x
+        crop_data["pan_y"] = pan_y
+        return crop_data
+
     def _generate_filter_complex(self, face_box: Dict[str, int], orig_w: int, orig_h: int) -> Dict[str, str]:
         """
         Generates FFmpeg filter complex string for:
@@ -425,9 +517,194 @@ class FacecamCropper:
             "game_crop": {"x": game_crop_x, "y": game_crop_y, "w": game_crop_w, "h": game_crop_h}
         }
 
+    def compute_custom_crop(self, face_box: Dict[str, Any], game_box: Dict[str, Any], orig_w: int = 1280, orig_h: int = 720) -> Dict[str, Any]:
+        """
+        Computes 40/60 vertical composition from user-defined Red Box (Facecam) and Blue Box (Gameplay).
+        """
+        def _safe_int(val, default):
+            try:
+                return int(round(float(val)))
+            except Exception:
+                return default
+
+        fx = max(0, min(orig_w - 20, _safe_int(face_box.get('x', 0), 0)))
+        fy = max(0, min(orig_h - 20, _safe_int(face_box.get('y', 0), 0)))
+        fw = max(20, min(orig_w - fx, _safe_int(face_box.get('w', 400), 400)))
+        fh = max(20, min(orig_h - fy, _safe_int(face_box.get('h', 284), 284)))
+
+        gx = max(0, min(orig_w - 20, _safe_int(game_box.get('x', 0), 0)))
+        gy = max(0, min(orig_h - 20, _safe_int(game_box.get('y', 0), 0)))
+        gw = max(20, min(orig_w - gx, _safe_int(game_box.get('w', 675), 675)))
+        gh = max(20, min(orig_h - gy, _safe_int(game_box.get('h', 720), 720)))
+
+        # Ensure even coordinates for FFmpeg
+        fx -= (fx % 2)
+        fy -= (fy % 2)
+        fw = max(20, fw - (fw % 2))
+        fh = max(20, fh - (fh % 2))
+
+        gx -= (gx % 2)
+        gy -= (gy % 2)
+        gw = max(20, gw - (gw % 2))
+        gh = max(20, gh - (gh % 2))
+
+        cleaned_face = {'x': fx, 'y': fy, 'w': fw, 'h': fh}
+        cleaned_game = {'x': gx, 'y': gy, 'w': gw, 'h': gh}
+
+        # Enforce exact target aspect ratios inside the user's Red (1080:768) and Blue (1080:1152) boxes
+        # so the 9:16 vertical Short NEVER stretches or distorts and NEVER adds black bars.
+        face_aspect = self.target_face_w / self.target_face_h # 1.40625
+        if (fw / fh) > face_aspect:
+            eff_fh = fh
+            eff_fw = int(round(fh * face_aspect))
+        else:
+            eff_fw = fw
+            eff_fh = int(round(fw / face_aspect))
+        eff_fw = max(20, min(orig_w, eff_fw - (eff_fw % 2)))
+        eff_fh = max(20, min(orig_h, eff_fh - (eff_fh % 2)))
+        eff_fx = max(0, min(orig_w - eff_fw, fx + (fw - eff_fw) // 2))
+        eff_fy = max(0, min(orig_h - eff_fh, fy + (fh - eff_fh) // 2))
+        eff_fx -= (eff_fx % 2)
+        eff_fy -= (eff_fy % 2)
+
+        game_aspect = self.target_game_w / self.target_game_h # 0.9375
+        if (gw / gh) > game_aspect:
+            eff_gh = gh
+            eff_gw = int(round(gh * game_aspect))
+        else:
+            eff_gw = gw
+            eff_gh = int(round(gw / game_aspect))
+        eff_gw = max(20, min(orig_w, eff_gw - (eff_gw % 2)))
+        eff_gh = max(20, min(orig_h, eff_gh - (eff_gh % 2)))
+        eff_gx = max(0, min(orig_w - eff_gw, gx + (gw - eff_gw) // 2))
+        eff_gy = max(0, min(orig_h - eff_gh, gy + (gh - eff_gh) // 2))
+        eff_gx -= (eff_gx % 2)
+        eff_gy -= (eff_gy % 2)
+
+        filter_str = (
+            f"[0:v]split=2[v_face_in][v_game_in];"
+            f"[v_face_in]crop={eff_fw}:{eff_fh}:{eff_fx}:{eff_fy},scale={self.target_face_w}:{self.target_face_h}:flags=bicubic[v_top];"
+            f"[v_game_in]crop={eff_gw}:{eff_gh}:{eff_gx}:{eff_gy},scale={self.target_game_w}:{self.target_game_h}:flags=bicubic[v_bot];"
+            f"[v_top][v_bot]vstack[v_out]"
+        )
+
+        return {
+            "filter_complex": filter_str,
+            "face_box": cleaned_face,
+            "game_crop": cleaned_game
+        }
+
+    def _get_or_extract_full_frame(self) -> np.ndarray:
+        """
+        Loads preview_full_frame.jpg, or extracts one from any available candidate/segment if missing.
+        If no segment is ready yet, fetches a live stream frame via streamlink so Column 2 can be viewed and edited immediately.
+        """
+        full_frame_path = settings.CLIPS_DIR / "preview_full_frame.jpg"
+        if full_frame_path.exists():
+            frame = cv2.imread(str(full_frame_path))
+            if frame is not None and frame.size > 0 and np.mean(frame) > 1.0:
+                return frame
+
+        # 1. Try extracting a frame from any candidate or stream buffer segment via OpenCV
+        candidates = sorted(list(settings.CLIPS_DIR.glob("*_candidate.mp4")), key=lambda p: p.stat().st_mtime, reverse=True)
+        if not candidates:
+            candidates = sorted(list(settings.BUFFER_DIR.glob("*.ts")), key=lambda p: p.stat().st_mtime, reverse=True)
+        for cand in candidates[:3]:
+            try:
+                cap = cv2.VideoCapture(str(cand))
+                ok, frame = cap.read()
+                cap.release()
+                if ok and frame is not None and frame.size > 0:
+                    cv2.imwrite(str(full_frame_path), frame)
+                    return frame
+            except Exception:
+                pass
+
+        # 2. Try extracting via ffmpeg from the latest .ts segment
+        for cand in candidates[:2]:
+            try:
+                cmd = ["ffmpeg", "-y", "-i", str(cand), "-frames:v", "1", "-update", "1", str(full_frame_path)]
+                subprocess.run(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+                if full_frame_path.exists():
+                    frame = cv2.imread(str(full_frame_path))
+                    if frame is not None and frame.size > 0:
+                        return frame
+            except Exception:
+                pass
+
+        return np.zeros((720, 1280, 3), dtype=np.uint8)
+
+    def refresh_live_stream_frame(self) -> Optional[Dict[str, Any]]:
+        """
+        Captures a single stream frame once for Column 2 and locks it so that one frame lasts the entire time.
+        """
+        if state.col2_has_preview and state.layout_locked and state.current_facecam_box and state.current_gameplay_box:
+            return self.compute_custom_crop(
+                state.current_facecam_box,
+                state.current_gameplay_box,
+                state.frame_dimensions.get("w", 1280),
+                state.frame_dimensions.get("h", 720)
+            )
+
+        segments = sorted(list(settings.BUFFER_DIR.glob("seg_*.ts")), key=lambda p: p.stat().st_mtime, reverse=True)
+        if not segments:
+            return None
+
+        latest_seg = next((s for s in segments if s.stat().st_size > 30000), None)
+        if not latest_seg:
+            return None
+
+        return self.analyze_and_compute_crops(latest_seg)
+
+    def update_boxes_from_full_frame(self, face_box: Dict[str, Any], game_box: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Loads saved full frame, computes custom crop from user boxes, locks layout, saves to streamer profile, and updates preview images & state.
+        """
+        frame = self._get_or_extract_full_frame()
+        orig_h, orig_w = frame.shape[:2]
+        crop_data = self.compute_custom_crop(face_box, game_box, orig_w, orig_h)
+        state.layout_locked = True
+        state.col2_status = "LOCKED"
+        self.save_streamer_boxes(crop_data["face_box"], crop_data["game_crop"], settings.TWITCH_CHANNEL)
+        self._save_crop_previews(frame, crop_data["face_box"], crop_data["game_crop"])
+        return crop_data
+
+    def reset_to_ai_guess(self) -> Dict[str, Any]:
+        """
+        Explicitly re-runs 1-take AI detection on the full frame when user clicks 'RESET TO AI BOXES'.
+        """
+        frame = self._get_or_extract_full_frame()
+        orig_h, orig_w = frame.shape[:2]
+        face_result = self._detect_face_in_frame(frame)
+        if face_result:
+            left, top, fw, fh, conf = face_result
+            box, rule_name = self._auto_expand_facecam_box(frame, left, top, fw, fh, orig_w, orig_h)
+            state.edge_confidence = float(conf)
+            state.using_fallback = False
+            state.facecam_rule_applied = rule_name
+        else:
+            box = {
+                'x': int(orig_w * 0.05),
+                'y': int(orig_h * 0.55),
+                'w': int(orig_w * 0.32),
+                'h': int(orig_h * 0.40)
+            }
+            state.using_fallback = True
+
+        filter_data = self._generate_filter_complex(box, orig_w, orig_h)
+        state.layout_locked = True
+        state.col2_status = "LOCKED"
+        self.save_streamer_boxes(filter_data["face_box"], filter_data["game_crop"], settings.TWITCH_CHANNEL)
+        self._save_crop_previews(frame, filter_data["face_box"], filter_data["game_crop"])
+        return filter_data
+
     def _save_crop_previews(self, frame: np.ndarray, face_box: Dict[str, int], game_crop: Dict[str, int]):
         """Saves cropped preview snapshots for display in the dashboard framing column."""
         try:
+            # Save full stream frame for interactive live editor
+            full_frame_path = settings.CLIPS_DIR / "preview_full_frame.jpg"
+            cv2.imwrite(str(full_frame_path), frame)
+
             fx, fy, fw, fh = face_box['x'], face_box['y'], face_box['w'], face_box['h']
             face_crop = frame[fy:fy+fh, fx:fx+fw]
             if face_crop.size > 0:
@@ -438,6 +715,9 @@ class FacecamCropper:
             if game_crop_img.size > 0:
                 cv2.imwrite(str(settings.CLIPS_DIR / "preview_gameplay.jpg"), game_crop_img)
 
+            state.current_facecam_box = face_box
+            state.current_gameplay_box = game_crop
+            state.frame_dimensions = {"w": frame.shape[1], "h": frame.shape[0]}
             state.col2_has_preview = True
             state.preview_version += 1
         except Exception as e:
