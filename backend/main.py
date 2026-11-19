@@ -36,8 +36,32 @@ twitch_irc = TwitchIRCClient(settings.TWITCH_CHANNEL, on_message_callback=peak_d
 
 async def background_tick_loop():
     """Runs periodic state updates and broadcasts to WebSocket clients."""
+    last_yt_check = 0.0
     while True:
         try:
+            now_t = time.time()
+            # Daily and periodic YouTube verification check (every 60s)
+            if (now_t - last_yt_check) >= 60.0:
+                last_yt_check = now_t
+                try:
+                    health = await asyncio.to_thread(uploader.check_health)
+                    prev_status = state.youtube_auth_status
+                    state.youtube_auth_status = health.get("status", "NOT_CONNECTED")
+                    state.youtube_auth_error = health.get("error")
+                    state.youtube_token_days_old = health.get("days_old", 0.0)
+                    if health.get("expiring_soon") and state.youtube_auth_status == "HEALTHY":
+                        state.youtube_auth_status = "EXPIRING_SOON"
+
+                    if prev_status != state.youtube_auth_status:
+                        if state.youtube_auth_status == "EXPIRED":
+                            state.add_col3_log("⚠️ YouTube Auth Alert: Session expired (7-day Google testing limit). Click RECONNECT in the top header.")
+                        elif state.youtube_auth_status == "EXPIRING_SOON":
+                            state.add_col3_log(f"⚡ YouTube Auth Notice: Token is {state.youtube_token_days_old:.0f} days old (weekly re-auth recommended).")
+                        elif state.youtube_auth_status == "HEALTHY":
+                            state.add_col3_log("✓ YouTube credentials verified and healthy.")
+                except Exception:
+                    pass
+
             if state.is_monitoring:
                 peak_detector.tick()
 
@@ -80,6 +104,19 @@ def _cleanup_orphan_clip_files():
 async def lifespan(app: FastAPI):
     # Startup: clean orphaned clips & detect active YT account + streamer
     _cleanup_orphan_clip_files()
+
+    # Initial YouTube verification check on app launch
+    yt_health = await asyncio.to_thread(uploader.check_health, force=True)
+    state.youtube_auth_status = yt_health.get("status", "NOT_CONNECTED")
+    state.youtube_auth_error = yt_health.get("error")
+    state.youtube_token_days_old = yt_health.get("days_old", 0.0)
+    if state.youtube_auth_status == "HEALTHY":
+        state.add_col3_log(f"✓ YouTube authentication verified healthy on launch (Token: {state.youtube_token_days_old:.0f}d old).")
+    elif state.youtube_auth_status == "EXPIRED":
+        state.add_col3_log("⚠️ YouTube Auth Alert on Launch: Session expired (7-day Google testing limit). Re-authorize via header [RECONNECT] button.")
+    elif state.youtube_auth_status == "NOT_CONNECTED":
+        state.add_col3_log("Notice: No YouTube account connected yet.")
+
     active_acc = uploader.detect_active_account()
     if active_acc:
         mapped_streamer = uploader.get_streamer_for_account(active_acc)
@@ -146,7 +183,7 @@ async def get_status():
 async def get_schedule_preview():
     return {
         "timezone": settings.YOUTUBE_TIMEZONE,
-        "strategy": "1 post per day in peak engagement window",
+        "strategy": "3 posts per day in peak engagement windows (Midday, Afternoon, Prime Evening)",
         "calendar": scheduler.get_upcoming_schedule_preview(days=7)
     }
 
@@ -317,6 +354,63 @@ async def switch_youtube_account(payload: dict):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/api/youtube/health")
+async def get_youtube_health():
+    health = await asyncio.to_thread(uploader.check_health, force=True)
+    state.youtube_auth_status = health.get("status", "NOT_CONNECTED")
+    state.youtube_auth_error = health.get("error")
+    state.youtube_token_days_old = health.get("days_old", 0.0)
+    return health
+
+@app.post("/api/youtube/reauth")
+async def trigger_youtube_reauth():
+    """
+    Spawns login_youtube.bat via Windows ShellExecute to launch the interactive authentication window
+    and automatically open the Google OAuth consent screen in the user's default browser.
+    """
+    import os
+    import subprocess
+
+    bat_path = os.path.abspath(str(settings.BASE_DIR / "login_youtube.bat"))
+    state.youtube_reauth_in_progress = True
+    state.add_col3_log("Launching interactive YouTube login window...")
+    await manager.broadcast(state.to_dict())
+
+    try:
+        if hasattr(os, "startfile") and os.path.exists(bat_path):
+            os.startfile(bat_path)
+        else:
+            subprocess.Popen(["cmd.exe", "/c", "start", "", bat_path], shell=True)
+
+        # Background listener: polls for token update and updates state when user completes login
+        async def _watch_for_reauth():
+            start_t = time.time()
+            initial_mtime = (settings.BASE_DIR / settings.YOUTUBE_TOKEN_PATH).stat().st_mtime if (settings.BASE_DIR / settings.YOUTUBE_TOKEN_PATH).exists() else 0
+            while (time.time() - start_t) < 120.0:
+                await asyncio.sleep(2.5)
+                tok_file = settings.BASE_DIR / settings.YOUTUBE_TOKEN_PATH
+                if tok_file.exists() and tok_file.stat().st_mtime > initial_mtime:
+                    uploader.reload_credentials()
+                    health = await asyncio.to_thread(uploader.check_health, force=True)
+                    if health.get("status") == "HEALTHY":
+                        state.youtube_auth_status = "HEALTHY"
+                        state.youtube_auth_error = None
+                        state.youtube_token_days_old = health.get("days_old", 0.0)
+                        active_acc = uploader.detect_active_account()
+                        state.youtube_channel = active_acc or "CONNECTED"
+                        state.add_col3_log(f"✓ YouTube authorization renewed successfully! Channel: {state.youtube_channel}")
+                        await manager.broadcast(state.to_dict())
+                        break
+            state.youtube_reauth_in_progress = False
+            await manager.broadcast(state.to_dict())
+
+        asyncio.create_task(_watch_for_reauth())
+        return {"status": "LAUNCHED", "message": "Authentication window and browser launched."}
+    except Exception as e:
+        state.youtube_reauth_in_progress = False
+        state.add_col3_log(f"Failed to launch login window: {e}")
+        return {"status": "ERROR", "message": str(e)}
+
 @app.post("/api/youtube/reload")
 async def reload_youtube_auth():
     try:
@@ -351,6 +445,8 @@ async def update_clip_metadata(clip_id: str, payload: dict):
         clip["title"] = str(payload["title"]).strip()
     if "description" in payload and payload["description"] is not None:
         clip["description"] = str(payload["description"]).strip()
+    if "first_comment" in payload and payload["first_comment"] is not None:
+        clip["first_comment"] = str(payload["first_comment"]).strip()
 
     state.add_col3_log(f"Metadata updated for {clip_id}: Title='{clip.get('title', '')[:30]}...'")
     return {"status": "UPDATED", "clip": clip}
@@ -384,6 +480,7 @@ async def create_clip_from_studio_endpoint(clip_id: str, payload: dict):
     face_box = payload.get("face_box")
     game_box = payload.get("game_box")
     custom_title = payload.get("title")
+    custom_first_comment = payload.get("first_comment")
 
     if end_time <= start_time:
         raise HTTPException(status_code=400, detail="End time must be greater than start time")
@@ -397,7 +494,8 @@ async def create_clip_from_studio_endpoint(clip_id: str, payload: dict):
             end_time=end_time,
             face_box=face_box,
             game_box=game_box,
-            custom_title=custom_title
+            custom_title=custom_title,
+            custom_first_comment=custom_first_comment
         )
         await manager.broadcast(state.to_dict())
         return {"status": "SUCCESS", "clip": updated_clip}
@@ -500,6 +598,7 @@ async def generate_clip_ai(clip_id: str):
     clip["title"] = new_meta["title"]
     clip["description"] = new_meta["description"]
     clip["tags"] = new_meta["tags"]
+    clip["first_comment"] = new_meta.get("first_comment", "")
 
     state.add_col3_log(f"AI details generated: \"{clip['title']}\"")
     await manager.broadcast(state.to_dict())

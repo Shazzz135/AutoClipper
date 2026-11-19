@@ -1,5 +1,6 @@
 import os
 import json
+import time
 from pathlib import Path
 from typing import Dict, Any, Optional
 from datetime import datetime
@@ -31,7 +32,89 @@ class YouTubeUploader:
         self._service = None
 
     def is_authenticated(self) -> bool:
-        return self.token_path.exists()
+        if not self.token_path.exists():
+            return False
+        # If we have cached health status, respect it
+        health = getattr(self, "_cached_health", None)
+        if health and health.get("status") == "EXPIRED":
+            return False
+        return True
+
+    def check_health(self, force: bool = False) -> Dict[str, Any]:
+        """
+        Actively checks whether the active YouTube credentials are valid and can refresh,
+        or whether they are expired (e.g. 7-day Google testing limit, revoked, or invalid_grant).
+        Also inspects token age. Caches result for 30s to prevent spamming Google servers.
+        """
+        now = time.time()
+        last_check = getattr(self, "_last_health_check", 0)
+        cached = getattr(self, "_cached_health", None)
+        if not force and cached and (now - last_check) < 30.0:
+            return cached
+
+        if not self.token_path.exists():
+            res = {
+                "status": "NOT_CONNECTED",
+                "authenticated": False,
+                "error": "No token.json found.",
+                "days_old": 0.0,
+                "channel_title": "Not Connected"
+            }
+            self._cached_health = res
+            self._last_health_check = now
+            return res
+
+        # Check token file age (in days)
+        mtime = self.token_path.stat().st_mtime
+        days_old = round((now - mtime) / 86400.0, 1)
+
+        try:
+            creds = Credentials.from_authorized_user_file(str(self.token_path), SCOPES)
+            if not creds:
+                res = {
+                    "status": "EXPIRED",
+                    "authenticated": False,
+                    "error": "Token is empty or invalid format.",
+                    "days_old": days_old,
+                    "channel_title": "Invalid Token"
+                }
+                self._cached_health = res
+                self._last_health_check = now
+                return res
+
+            # Attempt a refresh using Google's Request to verify token validity
+            if creds.expired or not creds.valid:
+                creds.refresh(Request())
+                with open(self.token_path, "w") as f:
+                    f.write(creds.to_json())
+
+            active_channel = self.detect_active_account() or "Connected Channel"
+            res = {
+                "status": "HEALTHY",
+                "authenticated": True,
+                "error": None,
+                "days_old": days_old,
+                "expiring_soon": days_old >= 6.0,
+                "channel_title": active_channel
+            }
+            self._cached_health = res
+            self._last_health_check = now
+            return res
+
+        except Exception as e:
+            err_str = str(e)
+            is_invalid_grant = "invalid_grant" in err_str.lower()
+            res = {
+                "status": "EXPIRED",
+                "authenticated": False,
+                "error": "Google session expired (7-day testing limit or revoked). Re-authentication required." if is_invalid_grant else err_str,
+                "days_old": days_old,
+                "expiring_soon": False,
+                "channel_title": "Session Expired"
+            }
+            self._cached_health = res
+            self._last_health_check = now
+            return res
 
     def get_service(self):
         if self._service is not None:
@@ -385,5 +468,39 @@ class YouTubeUploader:
             "status": "UPLOADED",
             "publish_at": schedule_time_iso
         }
+
+    def post_comment(self, video_id: str, comment_text: str) -> Optional[str]:
+        """
+        Posts a top-level comment directly from the channel under the uploaded video.
+        """
+        if not comment_text or not comment_text.strip():
+            return None
+        if not HAS_GOOGLE_API or not self.is_authenticated():
+            state.add_col3_log(f"Simulating YouTube comment post on {video_id}: \"{comment_text[:40]}...\"")
+            return "mock_comment_id"
+
+        try:
+            state.add_col3_log(f"Posting first discussion comment on {video_id}...")
+            service = self.get_service()
+            body = {
+                "snippet": {
+                    "videoId": video_id,
+                    "topLevelComment": {
+                        "snippet": {
+                            "textOriginal": comment_text.strip()
+                        }
+                    }
+                }
+            }
+            res = service.commentThreads().insert(
+                part="snippet",
+                body=body
+            ).execute()
+            comment_id = res.get("id")
+            state.add_col3_log(f"First comment posted successfully! (ID: {comment_id})")
+            return comment_id
+        except Exception as e:
+            state.add_col3_log(f"Warning: Failed to post first comment ({str(e)})")
+            return None
 
 uploader = YouTubeUploader()

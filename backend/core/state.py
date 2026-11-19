@@ -12,6 +12,11 @@ class AppState:
         self.cpu_usage_pct: float = 0.0
         self.buffer_size_mb: float = 0.0
         self.youtube_channel: str = "CONNECTED"
+        self.youtube_auth_status: str = "CHECKING"  # "HEALTHY", "EXPIRED", "EXPIRING_SOON", "NOT_CONNECTED"
+        self.youtube_auth_error: Optional[str] = None
+        self.youtube_token_days_old: float = 0.0
+        self.youtube_reauth_in_progress: bool = False
+        self.youtube_last_verified_ts: float = 0.0
 
         # Streamer & Viewers Info
         self.stream_viewers: int = 0
@@ -253,6 +258,10 @@ class AppState:
             "cpu_usage_pct": self.cpu_usage_pct,
             "buffer_size_mb": self.buffer_size_mb,
             "youtube_channel": self.youtube_channel,
+            "youtube_auth_status": self.youtube_auth_status,
+            "youtube_auth_error": self.youtube_auth_error,
+            "youtube_token_days_old": self.youtube_token_days_old,
+            "youtube_reauth_in_progress": self.youtube_reauth_in_progress,
             "youtube_authenticated": bool(self.youtube_channel and self.youtube_channel != "NOT CONNECTED"),
             "youtube_status": self.youtube_channel,
             "auto_process": self.auto_process,
