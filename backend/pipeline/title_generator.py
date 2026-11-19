@@ -1,6 +1,8 @@
 import os
 import re
+import random
 import warnings
+from collections import deque
 from typing import Dict, List, Any, Optional
 from backend.core.config import settings
 from backend.core.state import state
@@ -8,20 +10,261 @@ from backend.core.state import state
 # Suppress library deprecation warning
 warnings.filterwarnings("ignore", category=FutureWarning)
 
+# ==============================================================================
+# 15 PRE-MADE UNIVERSAL GTA 6 TITLES
+# Every title strictly includes "GTA 6" and works for any clip.
+# ==============================================================================
+GTA6_TITLES_15 = [
+    "{streamer} FIRST TIME PLAYING GTA 6! 💀 #shorts",
+    "{streamer} CANNOT BELIEVE THIS IN GTA 6! 😭 #shorts",
+    "BRO DID NOT EXPECT THIS IN GTA 6 💀 #shorts",
+    "{streamer} MOST INSANE GTA 6 MOMENT! 🚨 #shorts",
+    "GTA 6 IS ALREADY OUT OF CONTROL 😭 #shorts",
+    "{streamer} 5-STAR POLICE CHASE IN GTA 6! 🚨 #shorts",
+    "HE REALLY THOUGHT HE SURVIVED GTA 6 💀 #shorts",
+    "{streamer} LOST HIS MIND IN GTA 6 😭 #shorts",
+    "GTA 6 GRAPHICS ARE ACTUALLY UNREAL 🤯 #shorts",
+    "{streamer} CLUTCH OR CHOKE IN GTA 6?! 💀 #shorts",
+    "THIS IS WHY GTA 6 TOOK 12 YEARS 💀 #shorts",
+    "{streamer} EXPLORING VICE CITY IN GTA 6! 🌴 #shorts",
+    "NO WAY THIS JUST HAPPENED IN GTA 6 💀 #shorts",
+    "{streamer} PURE CHAOS IN GTA 6! 🚨 #shorts",
+    "THE CRAZIEST THING YOU WILL SEE IN GTA 6 💀 #shorts"
+]
+
+# ==============================================================================
+# 15 PRE-MADE UNIVERSAL DISCUSSION COMMENTS
+# Designed to spark comment wars & debate. Works for any clip.
+# ==============================================================================
+GTA6_COMMENTS_15 = [
+    "Be honest... did {streamer} throw or clutch this GTA 6 moment? Drop your thoughts below! 👇💀",
+    "Is GTA 6 game of the year already or are people overhyping it? W or L reaction? 👇🔥",
+    "Did you expect this to happen in Vice City?! Tell me in the comments! 👇😂",
+    "Are you picking Jason or Lucia when you jump into GTA 6? Drop a comment! 👇🌴",
+    "Rate this GTA 6 moment from 1 to 10 in the comments! 👇💀",
+    "Bro really thought he had it under control 😭 W or L gameplay from {streamer}? 👇",
+    "What would you have done in this GTA 6 situation? Comment below! 👇🚨",
+    "Is GTA 6 living up to the 12-year wait so far? Drop your honest review below! 👇🎮",
+    "Was this pure skill or did the GTA 6 physics save him? Let me know below! 👇🤯",
+    "Who else is playing GTA 6 all night?! Drop a W in the comments! 👇🔥",
+    "The police AI in GTA 6 is actually ruthless 😭 Did he deserve to get caught? 👇",
+    "Best GTA 6 reaction so far? What do you think? Drop a comment! 👇💀",
+    "Did {streamer} cook or sell here? Be 100% honest in the comments! 👇🍳",
+    "The graphics in Vice City are insane! What console are you playing GTA 6 on? 👇📺",
+    "Only in GTA 6 bro 💀 What has been your favorite moment in the game so far? 👇"
+]
+
+# ==============================================================================
+# 15 PRE-MADE UNIVERSAL DESCRIPTIONS
+# High-ranking SEO format, Vice City & Leonida tags, engagement calls. Works for any clip.
+# ==============================================================================
+GTA6_DESCRIPTIONS_15 = [
+    # 1. Hype Vice City
+    """Watch {streamer}'s craziest reaction playing Grand Theft Auto VI (GTA 6) live on stream!
+The hype in Vice City is real... did you expect this to go down?!
+
+🎮 Game: Grand Theft Auto VI (GTA 6)
+📍 Map: Vice City, State of Leonida
+🌴 Characters: Jason & Lucia
+
+Drop your thoughts in the comments below! 👇
+
+#{streamer_tag} #GTA6 #GTAVI #GrandTheftAuto6 #GTA6Gameplay #ViceCity #shorts #gaming #viral""",
+
+    # 2. Chaos & Comedy
+    """{streamer} experiences pure chaos exploring GTA 6 live on Twitch!
+Did he throw or clutch up? You won't believe how this ended!
+
+🎮 Game: Grand Theft Auto 6 / GTA VI
+🌴 Location: Vice City & Leonida
+📺 Platform: PS5 Pro 4K 60FPS
+
+Leave a comment with your rating! 👇
+
+#{streamer_tag} #GTA6 #GTAVI #GTA6Gameplay #GrandTheftAuto6 #PS5Pro #ViceCity #shorts #viral #gaming""",
+
+    # 3. Free Roam & Walkthrough
+    """Unfiltered GTA 6 gameplay and insane moments with {streamer} live in Vice City!
+Exploring the full map of Leonida and finding crazy details in Grand Theft Auto VI.
+
+🎮 Game: Grand Theft Auto VI (GTA 6)
+🌴 Mission: Free Roam & Police Chase
+
+Are you playing on PS5 Pro or Xbox Series X? Let us know below! 👇
+
+#{streamer_tag} #GTA6 #GTAVI #GTA6Walkthrough #GTA6FreeRoam #ViceCity #GrandTheftAuto6 #shorts #gaming #viral""",
+
+    # 4. Topics Checklist
+    """{streamer} gets completely caught off guard in GTA 6! 
+Watch the full reaction live from Vice City in Grand Theft Auto VI.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━
+🔥 TOPICS COVERED:
+• GTA 6 gameplay & free roam exploration
+• {streamer} GTA 6 live stream moments & highlights
+• Grand Theft Auto 6 police chase and secrets
+• GTA 6 PS5 Pro graphics & Vice City map
+
+#{streamer_tag} #GTA6 #GTAVI #GrandTheftAuto6 #GTA6Gameplay #ViceCity #Leonida #shorts #gaming #viral""",
+
+    # 5. Game of the Year
+    """Is GTA 6 already the greatest open-world game ever made?!
+Watch {streamer} react to this unforgettable moment in Grand Theft Auto VI!
+
+🎮 Game: Grand Theft Auto VI (GTA 6)
+📍 Setting: Vice City & Leonida
+🌴 Protagonists: Jason Duval & Lucia Caminos
+
+Drop a W or L in the comments! 👇
+
+#{streamer_tag} #GTA6 #GTAVI #GrandTheftAuto6 #GTA6Review #ViceCity #JasonAndLucia #shorts #viral #gaming""",
+
+    # 6. Wild Stream Moments
+    """Nobody expected this to happen during {streamer}'s GTA 6 stream!
+Vice City has zero chill and the reactions are unbeatable.
+
+🎮 Game: Grand Theft Auto 6 (GTA VI)
+🌴 Map: State of Leonida
+
+What would you have done here? Comment below! 👇
+
+#{streamer_tag} #GTA6 #GTAVI #GTA6Clips #ViceCity #GamingMoments #shorts #viral""",
+
+    # 7. First Look
+    """First day in GTA 6 and {streamer} is already testing the limits of Vice City!
+From high speed chases to wild physics, this game is next level.
+
+🎮 Game: Grand Theft Auto VI
+📺 Resolution: 4K 60FPS Gameplay
+
+Is GTA 6 a 10/10 so far? Drop your verdict below! 👇
+
+#{streamer_tag} #GTA6 #GTAVI #GrandTheftAuto6 #ViceCity #GTA6FirstLook #shorts #gaming #viral""",
+
+    # 8. Police Chase
+    """When a casual drive in GTA 6 turns into absolute madness for {streamer}!
+The 5-star police aggression in Vice City is no joke.
+
+🎮 Game: Grand Theft Auto VI (GTA 6)
+🚨 Heat Level: Maximum Wanted Level
+
+Did he survive this? Tell me in the comments! 👇
+
+#{streamer_tag} #GTA6 #GTAVI #GTA6PoliceChase #ViceCity #GrandTheftAuto #shorts #viral""",
+
+    # 9. Graphics Showcase
+    """The visual details and graphics in GTA 6 are blowing everyone away!
+Watch {streamer}'s genuine reaction to the Vice City world.
+
+🎮 Title: Grand Theft Auto VI (GTA 6)
+📍 Location: Leonida & Vice Beach
+
+Are you picking up GTA 6 on PS5 Pro or Xbox? Let us know below! 👇
+
+#{streamer_tag} #GTA6 #GTAVI #GTA6Graphics #PS5Pro #ViceCity #GrandTheftAuto6 #shorts #gaming""",
+
+    # 10. Story & Characters
+    """Exploring the story of Jason and Lucia in GTA 6 with {streamer}!
+Every corner of Vice City has a new secret waiting to be found.
+
+🎮 Game: Grand Theft Auto VI (GTA 6)
+🌴 Duo: Jason & Lucia
+
+Who is your favorite character so far? Drop your thoughts! 👇
+
+#{streamer_tag} #GTA6 #GTAVI #JasonAndLucia #ViceCity #GTA6Story #shorts #gaming #viral""",
+
+    # 11. Funny Fail
+    """You cannot make this up... {streamer}'s reaction to this GTA 6 moment is priceless!
+Drop a like and comment if you laughed! 💀
+
+🎮 Game: Grand Theft Auto VI (GTA 6)
+🌴 Location: Vice City
+
+Did the game do him dirty? Be honest below! 👇
+
+#{streamer_tag} #GTA6 #GTAVI #GTA6Fails #ViceCity #FunnyMoments #shorts #gaming #viral""",
+
+    # 12. Highlights
+    """Peak streaming energy as {streamer} dives headfirst into GTA 6!
+Catch all the best Twitch highlights and unforgettable moments right here.
+
+🎮 Game: Grand Theft Auto 6 / GTA VI
+📍 World: Vice City & Leonida
+
+Drop a comment with your favorite streamer playing GTA 6! 👇
+
+#{streamer_tag} #GTA6 #GTAVI #TwitchClips #ViceCity #GTA6Highlights #shorts #gaming""",
+
+    # 13. Open World Discovery
+    """12 years in the making and GTA 6 did not disappoint!
+Watch {streamer} discover something unbelievable in the heart of Vice City.
+
+🎮 Game: Grand Theft Auto VI
+🌴 Map: Leonida
+
+Did you notice this in your own playthrough? Let me know below! 👇
+
+#{streamer_tag} #GTA6 #GTAVI #GTA6Secrets #ViceCity #GrandTheftAuto6 #shorts #viral""",
+
+    # 14. Clutch vs Choke
+    """Was this an elite clutch or the biggest choke in GTA 6 history?!
+Watch {streamer} battle it out on the streets of Vice City.
+
+🎮 Game: Grand Theft Auto 6 (GTA VI)
+🌴 Mission: High Stakes Free Roam
+
+W or L gameplay? Cast your vote in the comments! 👇
+
+#{streamer_tag} #GTA6 #GTAVI #GTA6Clutch #ViceCity #GrandTheftAuto #shorts #gaming""",
+
+    # 15. Launch Day Hype
+    """The launch of Grand Theft Auto VI is breaking the internet!
+Join {streamer} for the most insane highlights from Vice City.
+
+🎮 Game: Grand Theft Auto VI (GTA 6)
+📺 Broadcast: Live on Twitch
+
+Are you playing right now? Drop a 🔥 in the comments! 👇
+
+#{streamer_tag} #GTA6 #GTAVI #GrandTheftAuto6 #ViceCity #GTA6Launch #shorts #viral #gaming"""
+]
+
 class TitleGenerator:
     def __init__(self):
-        self.api_key = settings.GEMINI_API_KEY
-        self._genai = None
+        # Gemini is completely disabled per instructions. All metadata is picked from the 15 pre-made pools.
+        self._recent_titles = deque(maxlen=8)
+        self._recent_comments = deque(maxlen=8)
+        self._recent_descriptions = deque(maxlen=8)
 
-    def _get_genai(self):
-        if self._genai is None and self.api_key:
-            try:
-                import google.generativeai as genai
-                genai.configure(api_key=self.api_key)
-                self._genai = genai
-            except Exception:
-                self._genai = False
-        return self._genai if self._genai else None
+    def get_random_title(self, streamer: str) -> str:
+        """Picks a unique pre-made GTA 6 title from the 15 available, avoiding recent repeats."""
+        streamer_display = streamer.upper()
+        available = [t for t in GTA6_TITLES_15 if t not in self._recent_titles]
+        if not available:
+            available = GTA6_TITLES_15
+        chosen = random.choice(available)
+        self._recent_titles.append(chosen)
+        return chosen.format(streamer=streamer_display)
+
+    def get_random_comment(self, streamer: str) -> str:
+        """Picks a unique pre-made discussion comment from the 15 available, avoiding recent repeats."""
+        available = [c for c in GTA6_COMMENTS_15 if c not in self._recent_comments]
+        if not available:
+            available = GTA6_COMMENTS_15
+        chosen = random.choice(available)
+        self._recent_comments.append(chosen)
+        return chosen.format(streamer=streamer)
+
+    def get_random_description(self, streamer: str) -> str:
+        """Picks a unique pre-made GTA 6 description from the 15 available, avoiding recent repeats."""
+        streamer_tag = streamer.lower().replace(" ", "")
+        available = [d for d in GTA6_DESCRIPTIONS_15 if d not in self._recent_descriptions]
+        if not available:
+            available = GTA6_DESCRIPTIONS_15
+        chosen = random.choice(available)
+        self._recent_descriptions.append(chosen)
+        return chosen.format(streamer=streamer, streamer_tag=streamer_tag)
 
     def generate_title_and_metadata(
         self,
@@ -30,10 +273,10 @@ class TitleGenerator:
         part: int = 1
     ) -> Dict[str, Any]:
         """
-        Generates viral YouTube Shorts title, description, and tags from transcript words.
+        Instant 0ms metadata generator selecting from the 15 pre-made pools without Gemini AI.
         """
-        full_transcript = " ".join(w.get("word", "") for w in transcript_words).strip()
-        return self.generate_metadata_from_text(full_transcript, peak_info, part)
+        streamer = settings.TWITCH_CHANNEL.capitalize()
+        return self._generate_offline_metadata("", streamer, part)
 
     def generate_metadata_from_text(
         self,
@@ -42,115 +285,19 @@ class TitleGenerator:
         part: int = 1
     ) -> Dict[str, Any]:
         """
-        Generates viral YouTube Shorts title, description, and tags using AI (Gemini).
-        Enforces AI rate limits and falls back to offline heuristic if limits or connectivity fail.
+        Instant 0ms metadata generator selecting from the 15 pre-made pools without Gemini AI.
         """
-        info = peak_info or {}
         streamer = settings.TWITCH_CHANNEL.capitalize()
-
-        can_call_ai = (
-            bool(self.api_key) and
-            state.check_ai_rate_limit(settings.AI_MAX_CALLS_PER_MINUTE, settings.AI_MAX_CALLS_PER_DAY) and
-            bool(self._get_genai())
-        )
-
-        if can_call_ai:
-            for model_name in ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-1.5-pro"]:
-                try:
-                    state.add_col3_log(f"Calling Gemini AI ({model_name}) for viral metadata...")
-                    result = self._call_gemini_api(model_name, transcript, streamer, info, part)
-                    state.record_ai_call()
-                    state.add_col3_log(f"AI Metadata generated: \"{result['title']}\"")
-                    return result
-                except Exception as e:
-                    state.add_col3_log(f"Gemini ({model_name}) failed: {str(e)[:80]}")
-
-        # High-quality heuristic fallback generator if AI call is unavailable
-        state.add_col3_log("Generating high-engagement heuristic metadata.")
+        state.add_col3_log(f"Selecting unique pre-made GTA 6 viral metadata package for #{settings.TWITCH_CHANNEL}...")
         return self._generate_offline_metadata(transcript, streamer, part)
-
-    def _call_gemini_api(
-        self,
-        model_name: str,
-        transcript: str,
-        streamer: str,
-        peak_info: Dict[str, Any],
-        part: int
-    ) -> Dict[str, Any]:
-        genai = self._get_genai()
-        model = genai.GenerativeModel(model_name)
-        streamer_tag = streamer.lower().replace(" ", "")
-
-        prompt = f"""
-You are an elite YouTube Shorts algorithm strategist and viral video producer for high-energy Twitch stream clips.
-Streamer: {streamer}
-Spoken Words: "{transcript[:500]}"
-Chat Velocity: {peak_info.get('velocity', 25)} msgs/sec
-
-The biggest gaming event in history is happening (GTA 6 / Grand Theft Auto VI launch).
-Optimize this Short for maximum search volume and high-retention algorithmic push:
-
-SEO STRATEGY:
-- Title Formula: Combine an irresistible hook with high-volume search keywords (e.g. "GTA 6", "GTA VI", "Vice City", "Lucia & Jason", "PS5 Pro", "Police Chase", "Free Roam"). Max 60-70 characters. Include 1 emoji and #shorts.
-- Description: 
-  1. 2-3 punchy, hype sentences describing the streamer's reaction or gameplay moment.
-  2. A direct viewer question to trigger the comment algorithm.
-  3. A clean, high-ranking SEO keyword & search term block containing core launch queries (GTA 6 gameplay, Vice City, Leonida, Grand Theft Auto 6, Jason & Lucia).
-  4. Top hashtags: #shorts #{streamer_tag} #GTA6 #GTAVI #GrandTheftAuto6 #gaming #viral
-- Tags: 8-12 high-intent search tags targeting the game, streamer, and specific in-game moments.
-- First Comment: An irresistible debate-sparking question or hot take designed to get pinned as the first comment and ignite comment wars (e.g. "Be honest... did he throw or clutch up?! 👇💀"). Max 200 characters.
-
-Respond ONLY in this exact JSON format (no markdown, no code fences):
-{{
-  "title": "{streamer.upper()} INSANE GTA 6 MOMENT! 💀 #shorts",
-  "description": "{streamer} experiences the craziest moment in GTA 6 live on stream! Did you expect this in Vice City? Comment below!\\n\\n🎮 Game: Grand Theft Auto VI (GTA 6)\\n📍 Location: Vice City, Leonida\\n\\n#{streamer_tag} #GTA6 #GTAVI #GrandTheftAuto6 #shorts #gaming #viral",
-  "tags": ["{streamer_tag}", "gta 6", "gta vi", "grand theft auto 6", "gta 6 gameplay", "vice city", "leonida", "gta 6 ps5 pro", "shorts", "gaming", "viral"],
-  "first_comment": "Be honest... was this a throw or did the game glitch? Drop your thoughts below! 👇💀"
-}}
-"""
-        response = model.generate_content(prompt)
-        text = response.text.strip()
-
-        # Clean markdown code fences if present
-        text = re.sub(r"^```json\s*", "", text, flags=re.MULTILINE)
-        text = re.sub(r"^```\s*", "", text, flags=re.MULTILINE)
-
-        import json
-        json_match = re.search(r'\{.*\}', text, re.DOTALL)
-        if json_match:
-            data = json.loads(json_match.group(0))
-            if "title" in data and "description" in data:
-                first_comment = str(data.get("first_comment", "")).strip()
-                if not first_comment:
-                    first_comment = f"Drop your thoughts below: Did {streamer} throw or clutch up?! 👇💀"
-                return {
-                    "title": str(data["title"]).strip(),
-                    "description": str(data["description"]).strip(),
-                    "tags": list(data.get("tags", [streamer_tag, "shorts", "twitch", "viral"])),
-                    "first_comment": first_comment
-                }
-
-        raise ValueError("Invalid JSON received from Gemini")
 
     def _generate_offline_metadata(self, transcript: str, streamer: str, part: int) -> Dict[str, Any]:
         streamer_tag = streamer.lower().replace(" ", "")
 
-        # Extract punchy words
-        words = [w.strip(".,!?:;\"'").upper() for w in transcript.split() if len(w) > 3]
-        sample_phrase = " ".join(words[:3]) if words else "HYPE MOMENT"
+        title = self.get_random_title(streamer)
+        first_comment = self.get_random_comment(streamer)
+        description = self.get_random_description(streamer)
 
-        title = f"{streamer.upper()} FIRST TIME PLAYING GTA 6! 💀 #shorts"
-        if len(title) > 65:
-            title = f"{streamer.upper()} INSANE GTA 6 MOMENT 💀 #shorts"
-
-        description = (
-            f"Watch {streamer}'s craziest reaction playing GTA 6 (Grand Theft Auto VI) live on stream!\n"
-            f"Is GTA 6 game of the year already? W or L reaction? Drop your thoughts in the comments below!\n\n"
-            f"🎮 Game: Grand Theft Auto VI (GTA 6)\n"
-            f"📍 Map: Vice City & Leonida\n"
-            f"🌴 Characters: Jason & Lucia\n\n"
-            f"#{streamer_tag} #GTA6 #GTAVI #GrandTheftAuto6 #GTA6Gameplay #ViceCity #shorts #viral #gaming"
-        )
         tags = [
             streamer_tag,
             "gta 6",
@@ -167,10 +314,6 @@ Respond ONLY in this exact JSON format (no markdown, no code fences):
             "gaming",
             "viral"
         ]
-
-        first_comment = (
-            f"Be honest... did {streamer} throw or clutch this GTA 6 moment? Drop your thoughts below! 👇💀"
-        )
 
         return {
             "title": title,

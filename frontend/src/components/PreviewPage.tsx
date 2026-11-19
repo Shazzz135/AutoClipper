@@ -556,6 +556,28 @@ export default function PreviewPage({ clipId, onBack, onDiscard, state }) {
                 {actionStatus}
               </div>
             )}
+
+            {state?.youtube_auth_status === 'EXPIRED' && (
+              <div className="p-2.5 bg-red-950/40 border border-red-500/60 text-xs text-red-200 flex flex-wrap items-center justify-between gap-2">
+                <span className="flex items-center gap-1.5 font-bold">
+                  ⚠️ YouTube session expired (7-day Google limit)
+                </span>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    try {
+                      await fetch('/api/youtube/reauth', { method: 'POST' });
+                      setActionStatus('Opening browser to reconnect YouTube account...');
+                    } catch (e) {
+                      console.error(e);
+                    }
+                  }}
+                  className="bg-red-600 hover:bg-red-500 text-white font-bold px-2 py-1 text-[11px] rounded cursor-pointer transition-none"
+                >
+                  RECONNECT NOW
+                </button>
+              </div>
+            )}
           </div>
 
           {/* Action Buttons */}

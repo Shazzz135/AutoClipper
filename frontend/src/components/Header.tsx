@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Activity, Radio, Cpu, HardDrive, Sparkles, Video, Play, Edit2, Check, Volume2, VolumeX, Zap, UploadCloud } from 'lucide-react';
+import { Activity, Radio, Cpu, HardDrive, Sparkles, Video, Play, Edit2, Check, Volume2, VolumeX, Zap, UploadCloud, RefreshCw } from 'lucide-react';
 import { sound } from '../services/sound';
 
 export default function Header({ state, view, setView, onOpenPreview, isBuildingPreview, onTriggerTest }) {
@@ -13,6 +13,20 @@ export default function Header({ state, view, setView, onOpenPreview, isBuilding
   const [togglingMonitoring, setTogglingMonitoring] = useState(false);
   const [ytAccounts, setYtAccounts] = useState([]);
   const [switchingYt, setSwitchingYt] = useState(false);
+  const [isReauthing, setIsReauthing] = useState(false);
+
+  const handleReauth = async () => {
+    setIsReauthing(true);
+    try {
+      const res = await fetch('/api/youtube/reauth', { method: 'POST' });
+      const data = await res.json();
+      console.log('Reauth response:', data);
+    } catch (e) {
+      console.error('Reauth error:', e);
+    } finally {
+      setTimeout(() => setIsReauthing(false), 15000);
+    }
+  };
 
   const fetchYtAccounts = async () => {
     try {
@@ -194,7 +208,40 @@ export default function Header({ state, view, setView, onOpenPreview, isBuilding
 
           <div className="flex items-center gap-1.5 bg-[#0d0f12] px-2 py-0.5 border border-[#262b34] text-[11px] font-mono">
             <span className="text-[#88909e]">YT:</span>
-            {ytAccounts.length > 0 ? (
+            {state?.youtube_reauth_in_progress || isReauthing ? (
+              <span className="text-yellow-400 font-bold animate-pulse flex items-center gap-1">
+                <RefreshCw className="w-3 h-3 animate-spin" />
+                WAITING FOR BROWSER APPROVAL...
+              </span>
+            ) : state?.youtube_auth_status === 'EXPIRED' ? (
+              <div className="flex items-center gap-1.5">
+                <span className="text-red-400 font-bold flex items-center gap-1" title={state?.youtube_auth_error || 'OAuth session expired'}>
+                  ⚠️ SESSION EXPIRED
+                </span>
+                <button
+                  type="button"
+                  onClick={handleReauth}
+                  className="bg-red-600 hover:bg-red-500 text-white font-bold px-1.5 py-0.5 text-[10px] rounded cursor-pointer transition-none"
+                  title="Click to open browser and re-authorize YouTube account"
+                >
+                  RECONNECT
+                </button>
+              </div>
+            ) : state?.youtube_auth_status === 'EXPIRING_SOON' ? (
+              <div className="flex items-center gap-1.5">
+                <span className="text-yellow-400 font-bold" title="Google 7-day testing token is approaching expiration">
+                  ⚡ RENEW (~{Math.round(state?.youtube_token_days_old || 6)}d old)
+                </span>
+                <button
+                  type="button"
+                  onClick={handleReauth}
+                  className="bg-yellow-600 hover:bg-yellow-500 text-black font-bold px-1.5 py-0.5 text-[10px] rounded cursor-pointer transition-none"
+                  title="Click to renew YouTube authorization"
+                >
+                  RE-AUTH
+                </button>
+              </div>
+            ) : ytAccounts.length > 0 ? (
               <select
                 value={
                   ytAccounts.find(a => a.is_active || a.id.toLowerCase() === (state?.youtube_channel || '').toLowerCase())?.id ||

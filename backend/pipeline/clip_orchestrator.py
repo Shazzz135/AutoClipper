@@ -542,7 +542,10 @@ class ClipOrchestrator:
 
         except Exception as e:
             clip["status"] = "UPLOAD_ERROR"
-            state.add_col3_log(f"YouTube upload failed for {clip_id}: {str(e)}")
+            err_msg = str(e)
+            if "invalid_grant" in err_msg.lower():
+                err_msg = "YouTube session expired (invalid_grant). Please double-click login_youtube.bat to reconnect."
+            state.add_col3_log(f"YouTube upload failed: {err_msg}")
 
     def reject_clip(self, clip_id: str):
         clip = state.clips.get(clip_id)
