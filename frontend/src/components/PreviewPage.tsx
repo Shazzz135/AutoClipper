@@ -12,7 +12,8 @@ import {
   Edit3,
   Sparkles,
   Film,
-  ArrowLeft
+  ArrowLeft,
+  MessageSquare
 } from 'lucide-react';
 
 export default function PreviewPage({ clipId, onBack, onDiscard, state }) {
@@ -26,6 +27,7 @@ export default function PreviewPage({ clipId, onBack, onDiscard, state }) {
   // Editable metadata state
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
+  const [firstComment, setFirstComment] = useState('');
   const [isDirty, setIsDirty] = useState(false);
   const isDirtyRef = useRef(false);
   const [isSaving, setIsSaving] = useState(false);
@@ -139,6 +141,7 @@ export default function PreviewPage({ clipId, onBack, onDiscard, state }) {
         if (!isDirtyRef.current) {
           setTitle(data.title || '');
           setDescription(data.description || '');
+          setFirstComment(data.first_comment || '');
         }
       } else {
         if (onDiscard) onDiscard();
@@ -157,7 +160,11 @@ export default function PreviewPage({ clipId, onBack, onDiscard, state }) {
       const res = await fetch(`/api/clips/${clipId}/metadata`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ title: title.trim(), description: description.trim() })
+        body: JSON.stringify({
+          title: title.trim(),
+          description: description.trim(),
+          first_comment: firstComment.trim()
+        })
       });
       if (res.ok) {
         setIsDirty(false);
@@ -182,6 +189,7 @@ export default function PreviewPage({ clipId, onBack, onDiscard, state }) {
     if (clip) {
       setTitle(clip.title || '');
       setDescription(clip.description || '');
+      setFirstComment(clip.first_comment || '');
       setIsDirty(false);
       isDirtyRef.current = false;
       setSaveStatus(null);
@@ -198,6 +206,9 @@ export default function PreviewPage({ clipId, onBack, onDiscard, state }) {
         if (data.metadata) {
           setTitle(data.metadata.title);
           setDescription(data.metadata.description);
+          if (data.metadata.first_comment) {
+            setFirstComment(data.metadata.first_comment);
+          }
           setIsDirty(false);
           isDirtyRef.current = false;
           setSaveStatus('✨ AI details generated successfully!');
@@ -434,6 +445,30 @@ export default function PreviewPage({ clipId, onBack, onDiscard, state }) {
               }}
               rows={3}
               placeholder="Video description, channel credits, #shorts hashtags..."
+              className="w-full p-2 bg-[#0d0f12] border border-[#262b34] focus:border-[#00e676] text-xs text-[#e1e4ea] outline-none resize-y"
+            />
+          </div>
+
+          {/* First / Discussion Comment Textarea */}
+          <div>
+            <div className="flex items-center justify-between mb-1">
+              <label className="text-[10px] text-[#88909e] uppercase font-bold flex items-center gap-1">
+                <MessageSquare className="w-3 h-3 text-[#00e676]" />
+                First Comment (Auto-Posted as Channel Author)
+              </label>
+              <span className="text-[10px] text-[#88909e]">
+                {firstComment.length}/400 chars
+              </span>
+            </div>
+            <textarea
+              value={firstComment}
+              onChange={(e) => {
+                setFirstComment(e.target.value);
+                setIsDirty(true);
+                isDirtyRef.current = true;
+              }}
+              rows={2}
+              placeholder="e.g. Drop your thoughts below: Was this a clutch or a choke?! 👇💀"
               className="w-full p-2 bg-[#0d0f12] border border-[#262b34] focus:border-[#00e676] text-xs text-[#e1e4ea] outline-none resize-y"
             />
           </div>

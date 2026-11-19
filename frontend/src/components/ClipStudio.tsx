@@ -13,7 +13,8 @@ import {
   Sparkles,
   CheckCircle2,
   Terminal,
-  Edit3
+  Edit3,
+  MessageSquare
 } from 'lucide-react';
 
 export default function ClipStudio({ state, activeClip, activeClipId, onClipCreated, onDiscardClip }) {
@@ -71,6 +72,7 @@ export default function ClipStudio({ state, activeClip, activeClipId, onClipCrea
   const [isPlaying, setIsPlaying] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
   const [customTitle, setCustomTitle] = useState('');
+  const [customComment, setCustomComment] = useState('');
   const [isGeneratingTitle, setIsGeneratingTitle] = useState(false);
   const [isCreatingClip, setIsCreatingClip] = useState(false);
   const [createStatus, setCreateStatus] = useState(null);
@@ -84,6 +86,9 @@ export default function ClipStudio({ state, activeClip, activeClipId, onClipCrea
         const data = await res.json();
         if (data?.metadata?.title) {
           setCustomTitle(data.metadata.title);
+        }
+        if (data?.metadata?.first_comment) {
+          setCustomComment(data.metadata.first_comment);
         }
       }
     } catch (e) {
@@ -107,11 +112,13 @@ export default function ClipStudio({ state, activeClip, activeClipId, onClipCrea
       setTrimStart(Number(activeClip.trim_start ?? 155.0));
       setTrimEnd(Number(activeClip.trim_end ?? 200.0));
       setCustomTitle(activeClip.title || '');
+      setCustomComment(activeClip.first_comment || '');
       setCurrentVideoTime(0.0);
       setIsPlaying(false);
       setCreateStatus(null);
-    } else if (activeClip && activeClip.title && !customTitle) {
-      setCustomTitle(activeClip.title);
+    } else if (activeClip) {
+      if (activeClip.title && !customTitle) setCustomTitle(activeClip.title);
+      if (activeClip.first_comment && !customComment) setCustomComment(activeClip.first_comment);
     } else if (!activeClip) {
       loadedClipIdRef.current = null;
       setIsPlaying(false);
@@ -445,7 +452,8 @@ export default function ClipStudio({ state, activeClip, activeClipId, onClipCrea
           end_time: trimEnd,
           face_box: faceBoxRef.current,
           game_box: gameBoxRef.current,
-          title: customTitle.trim() || null
+          title: customTitle.trim() || null,
+          first_comment: customComment.trim() || null
         })
       });
       if (res.ok) {
@@ -908,6 +916,25 @@ export default function ClipStudio({ state, activeClip, activeClipId, onClipCrea
                     maxLength={100}
                     placeholder="Auto-generated viral title..."
                     className="w-full p-2 bg-[#0d0f12] border border-[#262b34] focus:border-[#00e676] text-xs font-bold text-white outline-none"
+                  />
+                </div>
+
+                {/* First Discussion Comment Input */}
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="text-[10px] text-[#88909e] uppercase font-bold flex items-center gap-1">
+                      <MessageSquare className="w-3 h-3 text-[#00e676]" />
+                      FIRST COMMENT (Auto-posted under video to drive discussion & boost algorithm)
+                    </label>
+                    <span className="text-[10px] text-[#88909e]">{customComment.length}/400</span>
+                  </div>
+                  <input
+                    type="text"
+                    value={customComment}
+                    onChange={(e) => setCustomComment(e.target.value)}
+                    maxLength={400}
+                    placeholder="e.g. Drop your thoughts below: Was this a clutch or a choke?! 👇💀"
+                    className="w-full p-2 bg-[#0d0f12] border border-[#262b34] focus:border-[#00e676] text-xs font-medium text-[#e1e4ea] outline-none"
                   />
                 </div>
 
