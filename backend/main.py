@@ -146,7 +146,7 @@ async def get_status():
 async def get_schedule_preview():
     return {
         "timezone": settings.YOUTUBE_TIMEZONE,
-        "strategy": "1 post per day in peak engagement window",
+        "strategy": "3 posts per day in peak engagement windows (Midday, Afternoon, Prime Evening)",
         "calendar": scheduler.get_upcoming_schedule_preview(days=7)
     }
 
@@ -351,6 +351,8 @@ async def update_clip_metadata(clip_id: str, payload: dict):
         clip["title"] = str(payload["title"]).strip()
     if "description" in payload and payload["description"] is not None:
         clip["description"] = str(payload["description"]).strip()
+    if "first_comment" in payload and payload["first_comment"] is not None:
+        clip["first_comment"] = str(payload["first_comment"]).strip()
 
     state.add_col3_log(f"Metadata updated for {clip_id}: Title='{clip.get('title', '')[:30]}...'")
     return {"status": "UPDATED", "clip": clip}
@@ -384,6 +386,7 @@ async def create_clip_from_studio_endpoint(clip_id: str, payload: dict):
     face_box = payload.get("face_box")
     game_box = payload.get("game_box")
     custom_title = payload.get("title")
+    custom_first_comment = payload.get("first_comment")
 
     if end_time <= start_time:
         raise HTTPException(status_code=400, detail="End time must be greater than start time")
@@ -397,7 +400,8 @@ async def create_clip_from_studio_endpoint(clip_id: str, payload: dict):
             end_time=end_time,
             face_box=face_box,
             game_box=game_box,
-            custom_title=custom_title
+            custom_title=custom_title,
+            custom_first_comment=custom_first_comment
         )
         await manager.broadcast(state.to_dict())
         return {"status": "SUCCESS", "clip": updated_clip}
@@ -500,6 +504,7 @@ async def generate_clip_ai(clip_id: str):
     clip["title"] = new_meta["title"]
     clip["description"] = new_meta["description"]
     clip["tags"] = new_meta["tags"]
+    clip["first_comment"] = new_meta.get("first_comment", "")
 
     state.add_col3_log(f"AI details generated: \"{clip['title']}\"")
     await manager.broadcast(state.to_dict())

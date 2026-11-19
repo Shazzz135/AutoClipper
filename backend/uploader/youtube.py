@@ -386,4 +386,38 @@ class YouTubeUploader:
             "publish_at": schedule_time_iso
         }
 
+    def post_comment(self, video_id: str, comment_text: str) -> Optional[str]:
+        """
+        Posts a top-level comment directly from the channel under the uploaded video.
+        """
+        if not comment_text or not comment_text.strip():
+            return None
+        if not HAS_GOOGLE_API or not self.is_authenticated():
+            state.add_col3_log(f"Simulating YouTube comment post on {video_id}: \"{comment_text[:40]}...\"")
+            return "mock_comment_id"
+
+        try:
+            state.add_col3_log(f"Posting first discussion comment on {video_id}...")
+            service = self.get_service()
+            body = {
+                "snippet": {
+                    "videoId": video_id,
+                    "topLevelComment": {
+                        "snippet": {
+                            "textOriginal": comment_text.strip()
+                        }
+                    }
+                }
+            }
+            res = service.commentThreads().insert(
+                part="snippet",
+                body=body
+            ).execute()
+            comment_id = res.get("id")
+            state.add_col3_log(f"First comment posted successfully! (ID: {comment_id})")
+            return comment_id
+        except Exception as e:
+            state.add_col3_log(f"Warning: Failed to post first comment ({str(e)})")
+            return None
+
 uploader = YouTubeUploader()

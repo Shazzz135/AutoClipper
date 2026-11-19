@@ -146,6 +146,7 @@ class ClipOrchestrator:
                         "title": initial_meta["title"],
                         "description": initial_meta["description"],
                         "tags": initial_meta["tags"],
+                        "first_comment": initial_meta.get("first_comment", ""),
                         "video_file": final_mp4_path.name,
                         "video_path": str(final_mp4_path),
                         "candidate_video_file": candidate_mp4_path.name,
@@ -246,7 +247,8 @@ class ClipOrchestrator:
         end_time: float,
         face_box: Optional[Dict[str, Any]] = None,
         game_box: Optional[Dict[str, Any]] = None,
-        custom_title: Optional[str] = None
+        custom_title: Optional[str] = None,
+        custom_first_comment: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Single-pass clip creation from the 16:9 Studio:
@@ -339,9 +341,11 @@ class ClipOrchestrator:
         await asyncio.to_thread(thumbnail_gen.extract_most_expressive_thumbnail, candidate_path, thumb_path)
 
         transcript_str = " ".join(w.get("word", "") for w in words).strip()
+        final_comment = custom_first_comment.strip() if (custom_first_comment and str(custom_first_comment).strip()) else meta.get("first_comment", "")
         clip["title"] = final_title
         clip["description"] = meta["description"]
         clip["tags"] = meta["tags"]
+        clip["first_comment"] = final_comment
         clip["transcript_text"] = transcript_str
         clip["all_words"] = words
         clip["trim_start"] = safe_start
@@ -505,9 +509,22 @@ class ClipOrchestrator:
             )
 
             video_url = upload_result.get("url")
+            video_id = upload_result.get("video_id")
             clip["status"] = "UPLOADED"
             clip["youtube_url"] = video_url
             state.add_col3_log(f"Clip [{clip_name}] published to YouTube Shorts: {video_url}")
+
+            # Automatically post first discussion comment if configured
+            comment_text = clip.get("first_comment")
+            if comment_text and video_id:
+                try:
+                    await asyncio.to_thread(
+                        uploader.post_comment,
+                        video_id,
+                        comment_text
+                    )
+                except Exception as e:
+                    state.add_col3_log(f"Warning: Could not post first comment: {e}")
 
             # Once clip is posted, immediately discard all artifacts and clear from SSD
             raw_path = Path(clip["raw_segment_path"]) if clip.get("raw_segment_path") else None

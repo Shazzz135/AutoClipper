@@ -82,21 +82,30 @@ class TitleGenerator:
         streamer_tag = streamer.lower().replace(" ", "")
 
         prompt = f"""
-You are an elite YouTube Shorts algorithm strategist and viral video producer for Twitch live stream highlights.
+You are an elite YouTube Shorts algorithm strategist and viral video producer for high-energy Twitch stream clips.
 Streamer: {streamer}
 Spoken Words: "{transcript[:500]}"
 Chat Velocity: {peak_info.get('velocity', 25)} msgs/sec
 
-Generate an ultra-clickable, high-retention YouTube Short package:
-1. TITLE: Max 60 characters, ALL-CAPS or punchy title case, irresistible hook, includes 1 emoji and #shorts.
-2. DESCRIPTION: 2-3 engaging sentences describing the moment, asking viewers a question to drive comments, followed by #shorts #{streamer_tag} #twitch.
-3. TAGS: An array of 6-10 trending tags for search indexing.
+The biggest gaming event in history is happening (GTA 6 / Grand Theft Auto VI launch).
+Optimize this Short for maximum search volume and high-retention algorithmic push:
+
+SEO STRATEGY:
+- Title Formula: Combine an irresistible hook with high-volume search keywords (e.g. "GTA 6", "GTA VI", "Vice City", "Lucia & Jason", "PS5 Pro", "Police Chase", "Free Roam"). Max 60-70 characters. Include 1 emoji and #shorts.
+- Description: 
+  1. 2-3 punchy, hype sentences describing the streamer's reaction or gameplay moment.
+  2. A direct viewer question to trigger the comment algorithm.
+  3. A clean, high-ranking SEO keyword & search term block containing core launch queries (GTA 6 gameplay, Vice City, Leonida, Grand Theft Auto 6, Jason & Lucia).
+  4. Top hashtags: #shorts #{streamer_tag} #GTA6 #GTAVI #GrandTheftAuto6 #gaming #viral
+- Tags: 8-12 high-intent search tags targeting the game, streamer, and specific in-game moments.
+- First Comment: An irresistible debate-sparking question or hot take designed to get pinned as the first comment and ignite comment wars (e.g. "Be honest... did he throw or clutch up?! 👇💀"). Max 200 characters.
 
 Respond ONLY in this exact JSON format (no markdown, no code fences):
 {{
-  "title": "{streamer.upper()} CANNOT BELIEVE THIS HAPPENED 💀 #shorts",
-  "description": "Watch what happens when {streamer} gets completely caught off guard live on stream! Did you expect this? Comment below!\\n\\n#{streamer_tag} #shorts #twitch #viral",
-  "tags": ["{streamer_tag}", "twitch", "shorts", "gaming", "viral", "highlights", "funny"]
+  "title": "{streamer.upper()} INSANE GTA 6 MOMENT! 💀 #shorts",
+  "description": "{streamer} experiences the craziest moment in GTA 6 live on stream! Did you expect this in Vice City? Comment below!\\n\\n🎮 Game: Grand Theft Auto VI (GTA 6)\\n📍 Location: Vice City, Leonida\\n\\n#{streamer_tag} #GTA6 #GTAVI #GrandTheftAuto6 #shorts #gaming #viral",
+  "tags": ["{streamer_tag}", "gta 6", "gta vi", "grand theft auto 6", "gta 6 gameplay", "vice city", "leonida", "gta 6 ps5 pro", "shorts", "gaming", "viral"],
+  "first_comment": "Be honest... was this a throw or did the game glitch? Drop your thoughts below! 👇💀"
 }}
 """
         response = model.generate_content(prompt)
@@ -111,10 +120,14 @@ Respond ONLY in this exact JSON format (no markdown, no code fences):
         if json_match:
             data = json.loads(json_match.group(0))
             if "title" in data and "description" in data:
+                first_comment = str(data.get("first_comment", "")).strip()
+                if not first_comment:
+                    first_comment = f"Drop your thoughts below: Did {streamer} throw or clutch up?! 👇💀"
                 return {
                     "title": str(data["title"]).strip(),
                     "description": str(data["description"]).strip(),
-                    "tags": list(data.get("tags", [streamer_tag, "shorts", "twitch", "viral"]))
+                    "tags": list(data.get("tags", [streamer_tag, "shorts", "twitch", "viral"])),
+                    "first_comment": first_comment
                 }
 
         raise ValueError("Invalid JSON received from Gemini")
@@ -126,21 +139,44 @@ Respond ONLY in this exact JSON format (no markdown, no code fences):
         words = [w.strip(".,!?:;\"'").upper() for w in transcript.split() if len(w) > 3]
         sample_phrase = " ".join(words[:3]) if words else "HYPE MOMENT"
 
-        title = f"{streamer.upper()}: \"{sample_phrase}\" 💀 #shorts"
+        title = f"{streamer.upper()} FIRST TIME PLAYING GTA 6! 💀 #shorts"
         if len(title) > 65:
-            title = f"{streamer.upper()} LOST HIS MIND LIVE 💀 #shorts"
+            title = f"{streamer.upper()} INSANE GTA 6 MOMENT 💀 #shorts"
 
         description = (
-            f"Watch {streamer}'s craziest reaction live on Twitch!\n"
-            f"Did you expect this to happen? Drop a comment below!\n\n"
-            f"#{streamer_tag} #shorts #twitch #viral #reaction #highlights"
+            f"Watch {streamer}'s craziest reaction playing GTA 6 (Grand Theft Auto VI) live on stream!\n"
+            f"Is GTA 6 game of the year already? W or L reaction? Drop your thoughts in the comments below!\n\n"
+            f"🎮 Game: Grand Theft Auto VI (GTA 6)\n"
+            f"📍 Map: Vice City & Leonida\n"
+            f"🌴 Characters: Jason & Lucia\n\n"
+            f"#{streamer_tag} #GTA6 #GTAVI #GrandTheftAuto6 #GTA6Gameplay #ViceCity #shorts #viral #gaming"
         )
-        tags = [streamer_tag, "twitch", "shorts", "gaming", "viral", "reaction", "highlights", "streamer"]
+        tags = [
+            streamer_tag,
+            "gta 6",
+            "gta vi",
+            "grand theft auto 6",
+            "gta 6 gameplay",
+            "gta 6 walkthrough",
+            "gta 6 free roam",
+            "vice city",
+            "leonida",
+            "jason and lucia",
+            "gta 6 ps5 pro",
+            "shorts",
+            "gaming",
+            "viral"
+        ]
+
+        first_comment = (
+            f"Be honest... did {streamer} throw or clutch this GTA 6 moment? Drop your thoughts below! 👇💀"
+        )
 
         return {
             "title": title,
             "description": description,
-            "tags": tags
+            "tags": tags,
+            "first_comment": first_comment
         }
 
 title_gen = TitleGenerator()
