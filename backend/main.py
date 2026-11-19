@@ -146,7 +146,7 @@ async def get_status():
 async def get_schedule_preview():
     return {
         "timezone": settings.YOUTUBE_TIMEZONE,
-        "strategy": "1 post per day in peak engagement window",
+        "strategy": "3 posts per day in peak engagement windows (Midday, Afternoon, Prime Evening)",
         "calendar": scheduler.get_upcoming_schedule_preview(days=7)
     }
 
