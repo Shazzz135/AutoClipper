@@ -15,16 +15,23 @@ class VideoComposer:
         start_time: float,
         end_time: float,
         output_mp4_path: Path,
-        max_duration: float = 60.0
+        max_duration: float = 58.0
     ) -> bool:
         """
         Renders the 1080x1920 vertical video (40/60 split) with burned ASS subtitles
-        using an optimized single-pass FFmpeg command.
+        using an optimized single-pass FFmpeg command strictly adhering to YouTube Shorts specifications:
+        - Strict <60s duration (clamped to 58.0s)
+        - H.264 High Profile Level 4.2, 1080x1920 9:16
+        - Constant 60 FPS (CFR) to prevent YouTube transcode hanging
+        - Fixed 1-second closed GOP (60 frames) for instant high-speed YouTube ingestion
+        - Rec.709 colorspace metadata (bt709)
+        - 48kHz Stereo AAC audio with async resampler to eliminate A/V sync drift
+        - +faststart moov atom at beginning of MP4
         """
         state.col3_status = "RENDERING"
         t0 = time.time()
         duration = min(max_duration, max(3.0, end_time - start_time))
-        state.add_col3_log(f"Starting FFmpeg render (duration: {duration:.1f}s, output: 1080x1920)...")
+        state.add_col3_log(f"Starting YouTube-compliant FFmpeg render (duration: {duration:.1f}s, output: 1080x1920 60fps CFR)...")
 
         # Compose full filtergraph including subtitle burning
         # [v_out]ass=subtitles.ass[v_final]
@@ -34,24 +41,37 @@ class VideoComposer:
 
         cmd = [
             "ffmpeg", "-y",
-            "-ss", str(start_time),
-            "-t", str(duration),
+            "-ss", str(round(start_time, 2)),
+            "-t", str(round(duration, 2)),
             "-i", str(raw_video_path),
             "-filter_complex", full_filter,
             "-map", "[v_final]",
             "-map", "0:a?",
             "-c:v", "libx264",
             "-preset", "veryfast",
+            "-profile:v", "high",
+            "-level", "4.2",
             "-threads", "4",
             "-crf", "22",
+            "-r", "60",
+            "-fps_mode", "cfr",
+            "-g", "60",
+            "-keyint_min", "60",
+            "-sc_threshold", "0",
+            "-pix_fmt", "yuv420p",
+            "-colorspace", "bt709",
+            "-color_primaries", "bt709",
+            "-color_trc", "bt709",
             "-c:a", "aac",
             "-b:a", "192k",
-            "-pix_fmt", "yuv420p",
+            "-ar", "48000",
+            "-ac", "2",
+            "-af", "aresample=async=1000:first_pts=0",
             "-movflags", "+faststart",
             str(output_mp4_path)
         ]
 
-        state.add_col3_log(f"Executing FFmpeg filter_complex on Snapdragon CPU...")
+        state.add_col3_log(f"Executing YouTube-optimized FFmpeg encode (60fps CFR, 48kHz stereo, Rec.709)...")
         res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
 
         render_duration = time.time() - t0

@@ -17,6 +17,7 @@ class AppState:
         self.youtube_token_days_old: float = 0.0
         self.youtube_reauth_in_progress: bool = False
         self.youtube_last_verified_ts: float = 0.0
+        self.youtube_quota: Dict[str, Any] = {}
 
         # Streamer & Viewers Info
         self.stream_viewers: int = 0
@@ -262,6 +263,7 @@ class AppState:
             "youtube_auth_error": self.youtube_auth_error,
             "youtube_token_days_old": self.youtube_token_days_old,
             "youtube_reauth_in_progress": self.youtube_reauth_in_progress,
+            "youtube_quota": self.youtube_quota,
             "youtube_authenticated": bool(self.youtube_channel and self.youtube_channel != "NOT CONNECTED"),
             "youtube_status": self.youtube_channel,
             "auto_process": self.auto_process,

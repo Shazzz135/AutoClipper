@@ -23,8 +23,6 @@ export default function Header({ state, view, setView, onOpenPreview, isBuilding
       console.log('Reauth response:', data);
     } catch (e) {
       console.error('Reauth error:', e);
-    } finally {
-      setTimeout(() => setIsReauthing(false), 15000);
     }
   };
 
@@ -44,6 +42,29 @@ export default function Header({ state, view, setView, onOpenPreview, isBuilding
     fetchYtAccounts();
   }, [state?.youtube_channel]);
 
+  // Check every 10 seconds when re-authorizing until reconnected
+  useEffect(() => {
+    const isWaiting = isReauthing || state?.youtube_reauth_in_progress;
+    if (!isWaiting) return;
+
+    const interval = setInterval(async () => {
+      try {
+        const res = await fetch('/api/youtube/health');
+        if (res.ok) {
+          const health = await res.json();
+          if (health.status === 'HEALTHY') {
+            setIsReauthing(false);
+            await fetchYtAccounts();
+          }
+        }
+      } catch (e) {
+        console.error('Health poll error:', e);
+      }
+    }, 10000);
+
+    return () => clearInterval(interval);
+  }, [isReauthing, state?.youtube_reauth_in_progress]);
+
   const handleYtAccountSwitch = async (accountId) => {
     if (!accountId) return;
     setSwitchingYt(true);
@@ -54,6 +75,7 @@ export default function Header({ state, view, setView, onOpenPreview, isBuilding
         body: JSON.stringify({ account_id: accountId })
       });
       if (res.ok) {
+        setIsReauthing(false);
         await fetchYtAccounts();
         if (setView) setView('dashboard');
       }
@@ -197,8 +219,21 @@ export default function Header({ state, view, setView, onOpenPreview, isBuilding
 
           <div className="flex items-center gap-1">
             <Sparkles className="w-3.5 h-3.5 text-yellow-400" />
-            <span>AI CALLS:</span>
-            <span className="text-white font-mono">{state?.ai_calls_today || 0} / 30</span>
+            <span>AI:</span>
+            <span className="text-white font-mono">{state?.ai_calls_today || 0}/30</span>
+          </div>
+
+          <div
+            className="flex items-center gap-1 cursor-default select-none"
+            title={`Daily Upload Allowance: ${state?.youtube_quota?.active_remaining ?? 3}/3 remaining for ${state?.youtube_quota?.active_account || 'active channel'} (${state?.youtube_quota?.total_used_today ?? 0}/6 total used across Google Cloud). Resets in ${state?.youtube_quota?.reset_display || '14h'}.`}
+          >
+            <UploadCloud className="w-3.5 h-3.5 text-cyan-400" />
+            <span>UPLOADS:</span>
+            <span className={`font-mono font-bold ${
+              (state?.youtube_quota?.active_remaining ?? 3) > 0 ? 'text-[#00e676]' : 'text-red-400'
+            }`}>
+              {state?.youtube_quota?.active_remaining ?? 3}/3
+            </span>
           </div>
 
           <div className="flex items-center gap-1">
@@ -206,42 +241,9 @@ export default function Header({ state, view, setView, onOpenPreview, isBuilding
             <span className="text-white font-mono">{state?.clips_count || 0}</span>
           </div>
 
-          <div className="flex items-center gap-1.5 bg-[#0d0f12] px-2 py-0.5 border border-[#262b34] text-[11px] font-mono">
+          <div className="flex items-center gap-2 bg-[#0d0f12] px-2 py-0.5 border border-[#262b34] text-[11px] font-mono">
             <span className="text-[#88909e]">YT:</span>
-            {state?.youtube_reauth_in_progress || isReauthing ? (
-              <span className="text-yellow-400 font-bold animate-pulse flex items-center gap-1">
-                <RefreshCw className="w-3 h-3 animate-spin" />
-                WAITING FOR BROWSER APPROVAL...
-              </span>
-            ) : state?.youtube_auth_status === 'EXPIRED' ? (
-              <div className="flex items-center gap-1.5">
-                <span className="text-red-400 font-bold flex items-center gap-1" title={state?.youtube_auth_error || 'OAuth session expired'}>
-                  ⚠️ SESSION EXPIRED
-                </span>
-                <button
-                  type="button"
-                  onClick={handleReauth}
-                  className="bg-red-600 hover:bg-red-500 text-white font-bold px-1.5 py-0.5 text-[10px] rounded cursor-pointer transition-none"
-                  title="Click to open browser and re-authorize YouTube account"
-                >
-                  RECONNECT
-                </button>
-              </div>
-            ) : state?.youtube_auth_status === 'EXPIRING_SOON' ? (
-              <div className="flex items-center gap-1.5">
-                <span className="text-yellow-400 font-bold" title="Google 7-day testing token is approaching expiration">
-                  ⚡ RENEW (~{Math.round(state?.youtube_token_days_old || 6)}d old)
-                </span>
-                <button
-                  type="button"
-                  onClick={handleReauth}
-                  className="bg-yellow-600 hover:bg-yellow-500 text-black font-bold px-1.5 py-0.5 text-[10px] rounded cursor-pointer transition-none"
-                  title="Click to renew YouTube authorization"
-                >
-                  RE-AUTH
-                </button>
-              </div>
-            ) : ytAccounts.length > 0 ? (
+            {ytAccounts.length > 0 ? (
               <select
                 value={
                   ytAccounts.find(a => a.is_active || a.id.toLowerCase() === (state?.youtube_channel || '').toLowerCase())?.id ||
@@ -250,18 +252,93 @@ export default function Header({ state, view, setView, onOpenPreview, isBuilding
                 }
                 onChange={(e) => handleYtAccountSwitch(e.target.value)}
                 disabled={switchingYt}
-                className="bg-transparent text-[#00e676] font-bold outline-none cursor-pointer border-none py-0 text-[11px]"
-                title="Select YouTube account to post to (automatically sets tracked Twitch streamer)"
+                className={`bg-transparent font-bold outline-none cursor-pointer border-none py-0 text-[11px] ${
+                  state?.youtube_auth_status === 'EXPIRED'
+                    ? 'text-red-400'
+                    : state?.youtube_auth_status === 'NOT_CONNECTED' || state?.youtube_channel === 'NOT CONNECTED'
+                      ? 'text-yellow-400'
+                      : 'text-[#00e676]'
+                }`}
+                title="Switch active YouTube account (each account has independent credentials)"
               >
                 {ytAccounts.map((acc) => (
                   <option key={acc.id} value={acc.id} className="bg-[#14171d] text-white">
-                    {acc.name} (#{acc.streamer})
+                    {acc.name}
                   </option>
                 ))}
               </select>
             ) : (
               <span className={`font-bold ${state?.youtube_authenticated !== false && state?.youtube_channel !== 'NOT CONNECTED' ? 'text-[#00e676]' : 'text-yellow-400'}`}>
                 {state?.youtube_authenticated !== false && state?.youtube_channel !== 'NOT CONNECTED' ? (state?.youtube_channel || 'CONNECTED') : 'NOT CONNECTED'}
+              </span>
+            )}
+
+            {/* Account Status Badge & Reconnect Button (Always accessible) */}
+            {state?.youtube_reauth_in_progress || isReauthing ? (
+              <div className="flex items-center gap-1">
+                <span className="text-yellow-400 font-bold animate-pulse flex items-center gap-1 text-[10px]" title="Checking verification status every 10 seconds until reconnected">
+                  <RefreshCw className="w-3 h-3 animate-spin" />
+                  CHECKING (10s)...
+                </span>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    setIsReauthing(false);
+                    try {
+                      await fetch('/api/youtube/cancel_reauth', { method: 'POST' });
+                    } catch (e) {}
+                  }}
+                  className="bg-[#262b34] hover:bg-[#343b47] text-[#88909e] hover:text-white px-1 py-0.5 text-[9px] rounded cursor-pointer"
+                  title="Cancel 10s check"
+                >
+                  ✕
+                </button>
+              </div>
+            ) : state?.youtube_auth_status === 'EXPIRED' ? (
+              <div className="flex items-center gap-1">
+                <span className="text-red-400 font-bold flex items-center gap-0.5 text-[10px]" title={state?.youtube_auth_error || 'Google token expired'}>
+                  ⚠️ EXPIRED
+                </span>
+                <button
+                  type="button"
+                  onClick={handleReauth}
+                  className="bg-red-600 hover:bg-red-500 text-white font-bold px-1.5 py-0.5 text-[10px] rounded cursor-pointer transition-none"
+                  title="Re-authorize this account via browser"
+                >
+                  RECONNECT
+                </button>
+              </div>
+            ) : state?.youtube_auth_status === 'EXPIRING_SOON' ? (
+              <div className="flex items-center gap-1">
+                <span className="text-yellow-400 font-bold text-[10px]" title="Token approaching 7-day limit">
+                  ⚡ RENEW (~{Math.round(state?.youtube_token_days_old || 6)}d)
+                </span>
+                <button
+                  type="button"
+                  onClick={handleReauth}
+                  className="bg-yellow-600 hover:bg-yellow-500 text-black font-bold px-1.5 py-0.5 text-[10px] rounded cursor-pointer transition-none"
+                  title="Renew authorization"
+                >
+                  RE-AUTH
+                </button>
+              </div>
+            ) : state?.youtube_auth_status === 'NOT_CONNECTED' || state?.youtube_channel === 'NOT CONNECTED' || state?.youtube_authenticated === false ? (
+              <div className="flex items-center gap-1">
+                <span className="text-yellow-400 font-bold text-[10px]">
+                  ⚠️ NOT CONNECTED
+                </span>
+                <button
+                  type="button"
+                  onClick={handleReauth}
+                  className="bg-yellow-600 hover:bg-yellow-500 text-black font-bold px-1.5 py-0.5 text-[10px] rounded cursor-pointer transition-none"
+                  title="Connect YouTube account"
+                >
+                  CONNECT
+                </button>
+              </div>
+            ) : (
+              <span className="text-[#00e676] font-bold text-[10px] flex items-center gap-0.5" title="YouTube connection healthy">
+                ● OK
               </span>
             )}
           </div>

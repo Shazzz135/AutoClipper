@@ -53,14 +53,6 @@ class ClipOrchestrator:
                 state.col2_status = "WAITING"
                 state.col3_status = "WAITING"
 
-                # Wait for rolling buffer to capture 1 minute (60s) after the peak moment so the clip is a full 4 minutes (3m before + 1m after)
-                peak_timestamp = peak_info.get("timestamp", time.time())
-                elapsed = time.time() - peak_timestamp
-                if elapsed < 58.0:
-                    wait_sec = int(60.0 - elapsed)
-                    state.add_col1_log(f"Buffering {wait_sec}s to capture full 1 minute of stream reaction after peak (for 4-min clip: 3m before + 1m after)...")
-                    await asyncio.sleep(wait_sec)
-
                 raw_segment_path = settings.BUFFER_DIR / f"{clip_id}_raw.mp4"
                 candidate_mp4_path = settings.CLIPS_DIR / f"{clip_id}_candidate.mp4"
                 audio_path = settings.CLIPS_DIR / f"{clip_id}_audio.wav"
@@ -68,22 +60,51 @@ class ClipOrchestrator:
                 thumb_path = settings.CLIPS_DIR / f"{clip_id}_thumb.jpg"
                 final_mp4_path = settings.CLIPS_DIR / f"{clip_id}.mp4"
 
-                # 1. Extract full 4-minute (240s) 16:9 candidate footage (3 min before & 1 min after peak) anchored to peak_timestamp
-                state.add_col1_log("Extracting 4-minute (240s) 16:9 stream footage (3m before & 1m after peak, accounting for reaction delay)...")
-                success, computed_peak_offset = await asyncio.to_thread(
-                    self.stream_buffer.extract_recent_segment,
-                    240,
-                    raw_segment_path,
-                    peak_timestamp,
-                    180.0,
-                    60.0
-                )
-                if not success or not raw_segment_path.exists():
-                    state.add_col1_log("Stream buffer is still accumulating footage. Please wait ~30s for buffer to fill.")
-                    state.col1_status = "MONITORING"
-                    state.col2_status = "IDLE"
-                    state.col3_status = "IDLE"
-                    return
+                is_vod = bool(peak_info.get("is_vod") or peak_info.get("vod_url"))
+                if is_vod:
+                    vod_url = peak_info.get("vod_url") or peak_info.get("url")
+                    offset_s = float(peak_info.get("offset_seconds") or 0.0)
+                    time_disp = peak_info.get("time_display") or f"{int(offset_s)}s"
+                    state.add_col1_log(f"Extracting 4-minute candidate footage from Twitch VOD at {time_disp} (3m before + 1m after)...")
+                    from backend.pipeline.vod_scanner import vod_scanner
+                    success, computed_peak_offset = await asyncio.to_thread(
+                        vod_scanner.extract_vod_segment,
+                        vod_url,
+                        offset_s,
+                        raw_segment_path,
+                        180.0,
+                        60.0
+                    )
+                    if not success or not raw_segment_path.exists():
+                        state.add_col1_log("Failed to slice VOD segment from Twitch CDN stream. Please try again.")
+                        state.col1_status = "MONITORING"
+                        state.col2_status = "IDLE"
+                        state.col3_status = "IDLE"
+                        return
+                else:
+                    # Live rolling buffer path: wait for 1 minute post-roll reaction if needed
+                    peak_timestamp = peak_info.get("timestamp", time.time())
+                    elapsed = time.time() - peak_timestamp
+                    if elapsed < 58.0:
+                        wait_sec = int(60.0 - elapsed)
+                        state.add_col1_log(f"Buffering {wait_sec}s to capture full 1 minute of stream reaction after peak (for 4-min clip: 3m before + 1m after)...")
+                        await asyncio.sleep(wait_sec)
+
+                    state.add_col1_log("Extracting 4-minute (240s) 16:9 stream footage (3m before & 1m after peak, accounting for reaction delay)...")
+                    success, computed_peak_offset = await asyncio.to_thread(
+                        self.stream_buffer.extract_recent_segment,
+                        240,
+                        raw_segment_path,
+                        peak_timestamp,
+                        180.0,
+                        60.0
+                    )
+                    if not success or not raw_segment_path.exists():
+                        state.add_col1_log("Stream buffer is still accumulating footage. Please wait ~30s for buffer to fill.")
+                        state.col1_status = "MONITORING"
+                        state.col2_status = "IDLE"
+                        state.col3_status = "IDLE"
+                        return
 
                 # Copy into clips dir so the 16:9 Studio can play the full 4-minute video immediately
                 shutil.copy2(raw_segment_path, candidate_mp4_path)
@@ -493,6 +514,8 @@ class ClipOrchestrator:
                 )
 
             clip["status"] = "UPLOADING"
+            action_label = "immediate release" if immediate else f"scheduled release ({clip.get('scheduled_slot_display', 'slot')})"
+            state.add_col3_log(f"🎬 Approval received for [{clip_name}] ({action_label}). Initiating YouTube Data API pipeline...")
             video_path = Path(clip["video_path"])
             thumb_path = settings.CLIPS_DIR / clip["thumbnail_file"] if clip.get("thumbnail_file") else None
 
@@ -512,7 +535,9 @@ class ClipOrchestrator:
             video_id = upload_result.get("video_id")
             clip["status"] = "UPLOADED"
             clip["youtube_url"] = video_url
-            state.add_col3_log(f"Clip [{clip_name}] published to YouTube Shorts: {video_url}")
+            clip["upload_error"] = None
+            clip["uploaded_at"] = time.time()
+            state.add_col3_log(f"🎉 SUCCESS! Clip [{clip_name}] uploaded to YouTube Shorts: {video_url}")
 
             # Automatically post first discussion comment if configured
             comment_text = clip.get("first_comment")
@@ -526,17 +551,18 @@ class ClipOrchestrator:
                 except Exception as e:
                     state.add_col3_log(f"Warning: Could not post first comment: {e}")
 
-            # Once clip is posted, immediately discard all artifacts and clear from SSD
+            # Once clip is posted, purge heavy intermediate artifacts from SSD (keep final short briefly)
             raw_path = Path(clip["raw_segment_path"]) if clip.get("raw_segment_path") else None
             composer.purge_clip_artifacts(clip_id, raw_segment_path=raw_path)
 
-            # Keep uploaded link in state briefly so frontend can display the success URL, then auto-clear
+            # Keep uploaded link and confirmation in state so user can view/click the link, auto-clearing after 45s
             async def _delayed_purge():
-                await asyncio.sleep(3.5)
-                state.remove_clip(clip_id)
-                state.active_clip_id = None
-                state.reset_columns_2_and_3()
-                state.add_col3_log(f"Clip [{clip_name}] closed and SSD storage reclaimed. Ready for next peak.")
+                await asyncio.sleep(45.0)
+                if state.active_clip_id == clip_id:
+                    state.remove_clip(clip_id)
+                    state.active_clip_id = None
+                    state.reset_columns_2_and_3()
+                    state.add_col3_log(f"Clip [{clip_name}] closed and SSD storage reclaimed. Ready for next peak.")
 
             asyncio.create_task(_delayed_purge())
 
@@ -544,8 +570,9 @@ class ClipOrchestrator:
             clip["status"] = "UPLOAD_ERROR"
             err_msg = str(e)
             if "invalid_grant" in err_msg.lower():
-                err_msg = "YouTube session expired (invalid_grant). Please double-click login_youtube.bat to reconnect."
-            state.add_col3_log(f"YouTube upload failed: {err_msg}")
+                err_msg = "YouTube session expired (invalid_grant). Please click Reconnect in the navbar to authorize."
+            clip["upload_error"] = err_msg
+            state.add_col3_log(f"❌ YouTube upload failed: {err_msg}")
 
     def reject_clip(self, clip_id: str):
         clip = state.clips.get(clip_id)
