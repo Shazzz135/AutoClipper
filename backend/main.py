@@ -1,4 +1,5 @@
 import asyncio
+import time
 import os
 import json
 from pathlib import Path
@@ -22,6 +23,7 @@ from backend.ingestion.stream_buffer import StreamRollingBuffer
 from backend.pipeline.peak_detector import PeakDetector
 from backend.pipeline.clip_orchestrator import ClipOrchestrator
 from backend.pipeline.facecam_cropper import facecam_cropper
+from backend.pipeline.vod_scanner import vod_scanner
 from backend.uploader.youtube import uploader
 
 # Global services
@@ -323,7 +325,9 @@ async def get_youtube_accounts():
     return {
         "accounts": accounts,
         "active_channel": state.youtube_channel,
-        "tracked_streamer": settings.TWITCH_CHANNEL
+        "tracked_streamer": settings.TWITCH_CHANNEL,
+        "auth_status": state.youtube_auth_status,
+        "reauth_in_progress": state.youtube_reauth_in_progress
     }
 
 @app.get("/api/youtube/channel")
@@ -334,8 +338,25 @@ async def get_youtube_channel():
     return {
         "authenticated": uploader.is_authenticated(),
         "channel_title": channel_title,
-        "streamer": settings.TWITCH_CHANNEL
+        "streamer": settings.TWITCH_CHANNEL,
+        "auth_status": state.youtube_auth_status
     }
+
+@app.get("/api/youtube/uploads_status")
+async def get_youtube_uploads_status():
+    """Returns live processing and scheduling status of recent uploaded videos from Google servers."""
+    uploads = await asyncio.to_thread(uploader.get_recent_uploads_status, 15)
+    return {
+        "channel": state.youtube_channel,
+        "uploads": uploads
+    }
+
+@app.get("/api/youtube/quota")
+async def get_youtube_quota():
+    """Returns real-time upload budget tracking, remaining slots per account, and Google Cloud quota countdown."""
+    quota = uploader.get_upload_quota()
+    state.youtube_quota = quota
+    return quota
 
 @app.post("/api/youtube/switch")
 async def switch_youtube_account(payload: dict):
@@ -344,6 +365,8 @@ async def switch_youtube_account(payload: dict):
         raise HTTPException(status_code=400, detail="Missing account_id")
 
     try:
+        # Reset any ongoing reauth poll for previous account
+        state.youtube_reauth_in_progress = False
         res = uploader.switch_account(account_id)
         target_streamer = res.get("streamer")
         if target_streamer and target_streamer.lower() != settings.TWITCH_CHANNEL.lower():
@@ -367,13 +390,16 @@ async def trigger_youtube_reauth():
     """
     Spawns login_youtube.bat via Windows ShellExecute to launch the interactive authentication window
     and automatically open the Google OAuth consent screen in the user's default browser.
+    Checks verification every 10 seconds until the user completes login.
     """
     import os
     import subprocess
+    import shutil
 
     bat_path = os.path.abspath(str(settings.BASE_DIR / "login_youtube.bat"))
     state.youtube_reauth_in_progress = True
-    state.add_col3_log("Launching interactive YouTube login window...")
+    target_account = state.youtube_channel
+    state.add_col3_log(f"Launching YouTube re-authorization for account: {target_account}...")
     await manager.broadcast(state.to_dict())
 
     try:
@@ -382,34 +408,71 @@ async def trigger_youtube_reauth():
         else:
             subprocess.Popen(["cmd.exe", "/c", "start", "", bat_path], shell=True)
 
-        # Background listener: polls for token update and updates state when user completes login
-        async def _watch_for_reauth():
+        # Background listener: polls every 10 seconds until user completes login
+        async def _watch_for_reauth(target_acc: str):
             start_t = time.time()
-            initial_mtime = (settings.BASE_DIR / settings.YOUTUBE_TOKEN_PATH).stat().st_mtime if (settings.BASE_DIR / settings.YOUTUBE_TOKEN_PATH).exists() else 0
-            while (time.time() - start_t) < 120.0:
-                await asyncio.sleep(2.5)
-                tok_file = settings.BASE_DIR / settings.YOUTUBE_TOKEN_PATH
-                if tok_file.exists() and tok_file.stat().st_mtime > initial_mtime:
-                    uploader.reload_credentials()
-                    health = await asyncio.to_thread(uploader.check_health, force=True)
-                    if health.get("status") == "HEALTHY":
-                        state.youtube_auth_status = "HEALTHY"
-                        state.youtube_auth_error = None
-                        state.youtube_token_days_old = health.get("days_old", 0.0)
-                        active_acc = uploader.detect_active_account()
-                        state.youtube_channel = active_acc or "CONNECTED"
-                        state.add_col3_log(f"✓ YouTube authorization renewed successfully! Channel: {state.youtube_channel}")
-                        await manager.broadcast(state.to_dict())
-                        break
+            tok_file = settings.BASE_DIR / settings.YOUTUBE_TOKEN_PATH
+            tokens_dir = settings.BASE_DIR / "config" / "tokens"
+            tokens_dir.mkdir(parents=True, exist_ok=True)
+            check_num = 0
+
+            # Check every 10 seconds until reconnected (max 15 mins = 90 checks)
+            while (time.time() - start_t) < 900.0:
+                await asyncio.sleep(10.0)
+                check_num += 1
+
+                # If cancelled or account was changed while waiting, exit listener
+                if not state.youtube_reauth_in_progress:
+                    return
+
+                # Reload credentials and check health directly
+                uploader.reload_credentials()
+                health = await asyncio.to_thread(uploader.check_health, force=True)
+
+                if health.get("status") == "HEALTHY":
+                    state.youtube_auth_status = "HEALTHY"
+                    state.youtube_auth_error = None
+                    state.youtube_token_days_old = health.get("days_old", 0.0)
+
+                    # Update the target account's unique token file in config/tokens/
+                    if target_acc and target_acc not in ("CONNECTED", "NOT CONNECTED") and tok_file.exists():
+                        target_named_file = tokens_dir / f"{target_acc}.json"
+                        try:
+                            shutil.copy(tok_file, target_named_file)
+                        except Exception:
+                            pass
+
+                    detected_acc = uploader.detect_active_account() or target_acc
+                    state.youtube_channel = detected_acc or "CONNECTED"
+                    state.youtube_reauth_in_progress = False
+                    state.add_col3_log(f"✓ Reconnected successfully! YouTube account: {state.youtube_channel} is now HEALTHY.")
+                    await manager.broadcast(state.to_dict())
+                    return
+                else:
+                    state.add_col3_log(f"Re-authorization check #{check_num} (every 10s): waiting for browser approval for {target_acc}...")
+                    await manager.broadcast(state.to_dict())
+
             state.youtube_reauth_in_progress = False
+            state.add_col3_log(f"Re-authorization listener ended after 15 minutes for {target_acc}. Click Reconnect to retry.")
             await manager.broadcast(state.to_dict())
 
-        asyncio.create_task(_watch_for_reauth())
-        return {"status": "LAUNCHED", "message": "Authentication window and browser launched."}
+        asyncio.create_task(_watch_for_reauth(target_account))
+        return {
+            "status": "LAUNCHED",
+            "account": target_account,
+            "message": "Authentication window and browser launched. Checking every 10s until reconnected."
+        }
     except Exception as e:
         state.youtube_reauth_in_progress = False
         state.add_col3_log(f"Failed to launch login window: {e}")
         return {"status": "ERROR", "message": str(e)}
+
+@app.post("/api/youtube/cancel_reauth")
+async def cancel_youtube_reauth():
+    state.youtube_reauth_in_progress = False
+    state.add_col3_log("Re-authorization check cancelled.")
+    await manager.broadcast(state.to_dict())
+    return {"status": "CANCELLED"}
 
 @app.post("/api/youtube/reload")
 async def reload_youtube_auth():
@@ -423,6 +486,93 @@ async def reload_youtube_auth():
     state.add_col3_log(f"Reloaded YouTube credentials. Status: {state.youtube_channel}")
     await manager.broadcast(state.to_dict())
     return {"status": "RELOADED", "authenticated": is_authed}
+
+# ========================================================
+# Twitch VOD Scanner Endpoints (Ended Stream Peak Detection)
+# ========================================================
+
+@app.get("/api/vod/status")
+async def get_vod_status():
+    return vod_scanner.current_scan
+
+@app.post("/api/vod/scan")
+async def start_vod_scan(payload: dict):
+    vod_url = payload.get("vod_url", "").strip()
+    if not vod_url:
+        raise HTTPException(status_code=400, detail="Missing vod_url")
+
+    vod_id = vod_scanner.parse_vod_id(vod_url)
+    if not vod_id:
+        raise HTTPException(status_code=400, detail="Could not parse a valid Twitch VOD ID from URL")
+
+    # Run scanner in background thread so API doesn't block
+    def _run_scan():
+        def _prog_cb(pct, text):
+            state.add_col1_log(f"VOD Scan ({pct}%): {text}")
+            try:
+                loop = asyncio.new_event_loop()
+                loop.run_until_complete(manager.broadcast({"vod_scan": vod_scanner.current_scan, **state.to_dict()}))
+                loop.close()
+            except Exception:
+                pass
+
+        res = vod_scanner.scan_vod_for_peaks(vod_url, max_peaks=10, min_spacing_seconds=300, progress_cb=_prog_cb)
+        if res.get("status") == "SUCCESS":
+            meta = res.get("vod_info", {})
+            state.add_col1_log(f"✓ VOD Scan Complete: Discovered {len(res.get('peaks', []))} top moments for '{meta.get('title')}'")
+        else:
+            state.add_col1_log(f"⚠️ VOD Scan Failed: {res.get('error')}")
+
+    asyncio.create_task(asyncio.to_thread(_run_scan))
+    return {"status": "SCAN_STARTED", "vod_id": vod_id}
+
+@app.post("/api/vod/process_peak")
+async def process_vod_peak(payload: dict):
+    try:
+        if state.is_processing or orchestrator.is_processing or state.active_clip_id is not None:
+            raise HTTPException(status_code=409, detail="Only 1 clip at a time. Review or discard current clip first.")
+
+        vod_url = payload.get("vod_url") or (vod_scanner.current_scan.get("vod_info") or {}).get("url")
+        peak = payload.get("peak")
+        if not vod_url or not peak:
+            raise HTTPException(status_code=400, detail="Missing vod_url or peak details")
+
+        peak_info = {
+            "is_vod": True,
+            "vod_url": vod_url,
+            "peak_id": peak.get("peak_id", f"VOD_Peak_{int(time.time())}"),
+            "offset_seconds": float(peak.get("offset_seconds", 0.0)),
+            "time_display": peak.get("time_display", "00:00:00"),
+            "velocity": float(peak.get("velocity", 20.0)),
+            "z_score": float(peak.get("z_score", 3.5)),
+            "rank": peak.get("rank", 1),
+            "timestamp": time.time(),
+            "status": "PROCESSING"
+        }
+
+        state.add_col1_log(f"Initiating processing for VOD Peak #{peak.get('rank', 1)} at {peak.get('time_display')}...")
+        asyncio.create_task(orchestrator.process_peak_event(peak_info))
+        await manager.broadcast(state.to_dict())
+        return {"status": "PROCESSING_STARTED", "peak_id": peak_info["peak_id"]}
+    except HTTPException:
+        raise
+    except Exception as e:
+        state.add_col1_log(f"Error starting VOD peak processing: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/vod/clear")
+async def clear_vod_scan():
+    vod_scanner.current_scan = {
+        "is_scanning": False,
+        "progress_pct": 0,
+        "status_text": "IDLE",
+        "vod_info": None,
+        "peaks": [],
+        "error": None
+    }
+    state.add_col1_log("Cleared VOD scan session.")
+    await manager.broadcast(state.to_dict())
+    return {"status": "CLEARED"}
 
 @app.get("/api/clips")
 async def get_clips():

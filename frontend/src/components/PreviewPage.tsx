@@ -13,7 +13,12 @@ import {
   Sparkles,
   Film,
   ArrowLeft,
-  MessageSquare
+  MessageSquare,
+  AlertTriangle,
+  CheckCircle2,
+  RefreshCw,
+  Terminal,
+  UploadCloud
 } from 'lucide-react';
 
 export default function PreviewPage({ clipId, onBack, onDiscard, state }) {
@@ -38,6 +43,32 @@ export default function PreviewPage({ clipId, onBack, onDiscard, state }) {
   const [isSwitchingAccount, setIsSwitchingAccount] = useState(false);
 
   const videoRef = useRef(null);
+  const apiLogsContainerRef = useRef(null);
+
+  const rawLogs = state?.col3?.logs || [];
+  const apiLogs = rawLogs.filter((l) =>
+    l.includes('YouTube') ||
+    l.includes('upload') ||
+    l.includes('Upload') ||
+    l.includes('Category') ||
+    l.includes('Audience') ||
+    l.includes('License') ||
+    l.includes('Tags') ||
+    l.includes('thumbnail') ||
+    l.includes('comment') ||
+    l.includes('Approval') ||
+    l.includes('SUCCESS') ||
+    l.includes('failed') ||
+    l.includes('Shorts') ||
+    l.includes('Video ID')
+  );
+  const displayLogs = apiLogs.length > 0 ? apiLogs : rawLogs;
+
+  useEffect(() => {
+    if (apiLogsContainerRef.current) {
+      apiLogsContainerRef.current.scrollTop = apiLogsContainerRef.current.scrollHeight;
+    }
+  }, [rawLogs.length]);
 
   useEffect(() => {
     fetchClipDetails();
@@ -319,6 +350,7 @@ export default function PreviewPage({ clipId, onBack, onDiscard, state }) {
           <span className={`px-2.5 py-1 text-xs font-bold uppercase rounded ${
             clip.status === 'UPLOADED' ? 'bg-[#00e676]/20 text-[#00e676]' :
             clip.status === 'UPLOADING' ? 'bg-yellow-500/20 text-yellow-400' :
+            clip.status === 'UPLOAD_ERROR' ? 'bg-red-500/20 text-red-400 border border-red-500/40' :
             clip.status === 'REJECTED' || clip.status === 'DISCARDED' ? 'bg-red-500/20 text-red-400' :
             'bg-[#00e676]/20 text-[#00e676] border border-[#00e676]/40'
           }`}>
@@ -326,6 +358,97 @@ export default function PreviewPage({ clipId, onBack, onDiscard, state }) {
           </span>
         </div>
       </div>
+
+      {/* Prominent Upload Status Banners */}
+      {clip.status === 'UPLOADED' && (
+        <div className="p-4 bg-[#00e676]/10 border border-[#00e676]/50 rounded text-xs text-[#00e676] flex flex-col sm:flex-row items-center justify-between gap-3 shadow-lg">
+          <div className="flex items-center gap-3">
+            <CheckCircle2 className="w-6 h-6 text-[#00e676] shrink-0" />
+            <div>
+              <div className="font-bold text-sm text-white flex items-center gap-2">
+                <span>SUCCESS! CLIP UPLOADED TO YOUTUBE SHORTS</span>
+                <span className="bg-[#00e676]/20 text-[#00e676] px-1.5 py-0.5 rounded text-[10px] font-mono">LIVE / INGESTED</span>
+              </div>
+              <div className="text-xs text-[#88909e] mt-0.5">
+                Google received the 60fps vertical file. Storage will be reclaimed once reviewed.
+              </div>
+            </div>
+          </div>
+          {clip.youtube_url && (
+            <a
+              href={clip.youtube_url}
+              target="_blank"
+              rel="noreferrer"
+              className="bg-[#00e676] hover:bg-[#00c853] text-black font-bold px-4 py-2 text-xs flex items-center gap-2 cursor-pointer shrink-0"
+            >
+              <ExternalLink className="w-4 h-4" />
+              WATCH ON YOUTUBE SHORTS
+            </a>
+          )}
+        </div>
+      )}
+
+      {clip.status === 'UPLOADING' && (
+        <div className="p-4 bg-yellow-500/10 border border-yellow-500/40 rounded text-xs text-yellow-300 flex items-center justify-between gap-3 shadow-lg">
+          <div className="flex items-center gap-3">
+            <RefreshCw className="w-5 h-5 text-yellow-400 animate-spin shrink-0" />
+            <div>
+              <div className="font-bold text-sm text-white">UPLOADING DIRECTLY TO YOUTUBE SHORTS...</div>
+              <div className="text-xs text-yellow-300/80 mt-0.5">
+                Transferring 60fps vertical stream to Google servers with automatic resume. A success confirmation will appear here once complete.
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {clip.status === 'UPLOAD_ERROR' && (
+        <div className="p-4 bg-red-950/40 border border-red-500/60 rounded text-xs text-red-200 flex flex-col sm:flex-row items-center justify-between gap-3 shadow-lg">
+          <div className="flex items-center gap-3">
+            <AlertTriangle className="w-6 h-6 text-red-400 shrink-0" />
+            <div>
+              <div className="font-bold text-sm text-red-300">
+                {clip.upload_error?.includes('limit') ? 'YOUTUBE DAILY UPLOAD LIMIT REACHED' : 'YOUTUBE UPLOAD FAILED'}
+              </div>
+              <div className="text-xs text-red-300 mt-1 max-w-2xl leading-relaxed">
+                {clip.upload_error || 'Network connection dropped while communicating with Google API.'}
+              </div>
+              {clip.upload_error?.includes('limit') && (
+                <div className="text-[11px] text-yellow-300/90 mt-1 flex items-center gap-1.5">
+                  <span>💡 Tip: Enable <strong>Advanced Features</strong> in YouTube Studio to unlock up to 100 uploads/day, or switch to your other YouTube account in the navbar.</span>
+                </div>
+              )}
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            {clip.upload_error?.includes('limit') && (
+              <a
+                href="https://studio.youtube.com"
+                target="_blank"
+                rel="noreferrer"
+                className="bg-yellow-500 hover:bg-yellow-400 text-black font-bold px-3 py-1.5 text-xs flex items-center gap-1.5 cursor-pointer"
+              >
+                <ExternalLink className="w-3.5 h-3.5" />
+                YOUTUBE STUDIO
+              </a>
+            )}
+            <button
+              onClick={handleUploadNow}
+              className="bg-[#ff1e1e] hover:bg-[#d01818] text-white font-bold px-3 py-1.5 text-xs flex items-center gap-1.5 cursor-pointer"
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+              RETRY UPLOAD NOW
+            </button>
+            <button
+              onClick={handleApprove}
+              className="bg-[#00e676] hover:bg-[#00c853] text-black font-bold px-3 py-1.5 text-xs flex items-center gap-1.5 cursor-pointer"
+            >
+              <Check className="w-3.5 h-3.5" />
+              SCHEDULE INSTEAD
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Main 9:16 Vertical Preview & Download Card */}
       <div className="border border-[#262b34] bg-[#14171d] p-4 space-y-4">
@@ -504,52 +627,91 @@ export default function PreviewPage({ clipId, onBack, onDiscard, state }) {
 
         {/* YouTube Publishing & Action Buttons (5 cols) */}
         <div className="lg:col-span-5 border border-[#262b34] bg-[#14171d] p-4 space-y-3 flex flex-col justify-between">
-          <div className="space-y-3">
-            <div className="text-xs font-bold text-white uppercase flex items-center justify-between border-b border-[#262b34] pb-2">
-              <span>PUBLISHING DESTINATION</span>
-              {ytAccounts.length > 0 ? (
-                <div className="flex items-center gap-1.5 text-[10px] bg-[#0d0f12] px-2 py-0.5 border border-[#ff1e1e]/40">
-                  <select
-                    value={
-                      ytAccounts.find(a => a.is_active || a.id.toLowerCase() === (state?.youtube_channel || channelInfo?.channel_title || '').toLowerCase() || a.name.toLowerCase() === (channelInfo?.channel_title || state?.youtube_channel || '').toLowerCase())?.id ||
-                      ytAccounts[0]?.id || ''
-                    }
-                    onChange={(e) => handleAccountSwitch(e.target.value)}
-                    disabled={isSwitchingAccount}
-                    className="bg-transparent text-[#ff1e1e] font-bold outline-none cursor-pointer border-none py-0 text-[10px]"
-                  >
-                    {ytAccounts.map((acc) => (
-                      <option key={acc.id} value={acc.id} className="bg-[#14171d] text-white">
-                        {acc.name} (#{acc.streamer})
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              ) : channelInfo?.channel_title ? (
-                <span className="text-white text-[10px] bg-[#0d0f12] px-2 py-0.5 border border-[#ff1e1e]/40">
-                  Target: <strong className="text-[#ff1e1e]">{channelInfo.channel_title}</strong>
+          {/* Unified Publishing Channel & Allowance Card */}
+          <div className="border border-[#262b34] bg-[#14171d] p-3.5 space-y-3 font-mono">
+            <div className="flex items-center justify-between border-b border-[#262b34] pb-2">
+              <div className="flex items-center gap-1.5 text-xs font-bold text-white uppercase tracking-wide">
+                <UploadCloud className="w-3.5 h-3.5 text-[#ff1e1e]" />
+                <span>PUBLISHING CHANNEL & ALLOWANCE</span>
+              </div>
+              {state?.youtube_quota?.reset_display && (
+                <span className="text-[10px] text-[#88909e]">
+                  Quota resets in <strong className="text-white">{state.youtube_quota.reset_display}</strong>
                 </span>
-              ) : null}
+              )}
             </div>
 
-            <div className="p-2.5 bg-[#0d0f12] border border-[#262b34] space-y-2">
-              <div className="flex items-center justify-between text-xs">
-                <div className="flex items-center gap-1.5 text-white">
-                  <Calendar className="w-3.5 h-3.5 text-yellow-400" />
-                  <span>Assigned Slot: <strong className="text-[#00e676]">{clip.scheduled_slot_display}</strong></span>
-                </div>
-                <span className="text-[10px] text-[#88909e]">EST</span>
+            {/* Channel Switcher Pills */}
+            {ytAccounts.length > 0 && (
+              <div className="grid grid-cols-2 gap-2">
+                {ytAccounts.map((acc) => {
+                  const accQuota = state?.youtube_quota?.accounts?.[acc.id];
+                  const remaining = accQuota ? accQuota.remaining_today : 3;
+                  const isCurrent = acc.is_active || (state?.youtube_channel && acc.id.toLowerCase() === state.youtube_channel.toLowerCase());
+
+                  return (
+                    <button
+                      key={acc.id}
+                      type="button"
+                      disabled={isSwitchingAccount || isCurrent}
+                      onClick={() => handleAccountSwitch(acc.id)}
+                      className={`p-2.5 rounded text-left border flex flex-col justify-between transition-none cursor-pointer select-none ${
+                        isCurrent
+                          ? 'bg-[#1b251d] border-[#00e676]/60 text-white shadow-sm'
+                          : 'bg-[#0d0f12] border-[#262b34] text-[#88909e] hover:border-[#434c5e] hover:text-white'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between text-xs font-bold">
+                        <span className="truncate">{acc.name}</span>
+                        {isCurrent && (
+                          <span className="text-[#00e676] text-[9px] uppercase font-bold tracking-wider bg-[#00e676]/20 px-1 py-0.2 rounded">
+                            ACTIVE
+                          </span>
+                        )}
+                      </div>
+                      <div className="mt-1.5 flex items-center justify-between text-[11px]">
+                        <span className={`font-bold ${remaining > 0 ? 'text-[#00e676]' : 'text-red-400'}`}>
+                          {remaining} of 3 slots left
+                        </span>
+                        <span className="text-[10px] text-[#555d6e]">
+                          {3 - remaining} posted today
+                        </span>
+                      </div>
+                    </button>
+                  );
+                })}
               </div>
+            )}
+
+            {/* Release Schedule Slot Bar */}
+            <div className="p-2.5 bg-[#0d0f12] border border-[#262b34] rounded flex items-center justify-between text-xs">
+              <div className="flex items-center gap-2">
+                <Calendar className="w-3.5 h-3.5 text-yellow-400 shrink-0" />
+                <span className="text-[#88909e]">
+                  Scheduled Release: <strong className="text-[#00e676]">{clip.scheduled_slot_display}</strong>
+                </span>
+              </div>
+              <span className="text-[10px] text-[#88909e] hidden sm:inline">
+                Project Total: {state?.youtube_quota?.total_used_today ?? 0} of 6 used
+              </span>
             </div>
+
+            {/* Capacity Warning */}
+            {state?.youtube_quota?.active_at_capacity && (
+              <div className="p-2.5 bg-yellow-950/40 border border-yellow-500/50 rounded text-xs text-yellow-300">
+                ⚠️ {state.youtube_quota.active_account} reached its 3-video limit for today. Switch channels above or schedule for tomorrow.
+              </div>
+            )}
 
             {clip.youtube_url && (
-              <div className="p-2.5 bg-[#00e676]/10 border border-[#00e676]/30 text-xs text-[#00e676] flex items-center justify-between">
+              <div className="p-2.5 bg-[#00e676]/10 border border-[#00e676]/30 text-xs text-[#00e676] flex items-center justify-between rounded">
                 <span>Published: {clip.youtube_url}</span>
-                <a href={clip.youtube_url} target="_blank" rel="noreferrer" className="underline flex items-center gap-1">
+                <a href={clip.youtube_url} target="_blank" rel="noreferrer" className="underline flex items-center gap-1 font-bold">
                   Open Short <ExternalLink className="w-3 h-3" />
                 </a>
               </div>
             )}
+          </div>
 
             {actionStatus && (
               <div className="text-xs text-yellow-400 bg-yellow-500/10 p-2.5 border border-yellow-500/20">
@@ -557,17 +719,37 @@ export default function PreviewPage({ clipId, onBack, onDiscard, state }) {
               </div>
             )}
 
-            {state?.youtube_auth_status === 'EXPIRED' && (
+            {state?.youtube_reauth_in_progress && (
+              <div className="p-2.5 bg-yellow-950/40 border border-yellow-500/60 text-xs text-yellow-200 flex items-center justify-between gap-2">
+                <span className="flex items-center gap-1.5 font-bold animate-pulse">
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin text-yellow-400" />
+                  Checking verification every 10s until reconnected...
+                </span>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    try {
+                      await fetch('/api/youtube/cancel_reauth', { method: 'POST' });
+                    } catch (e) {}
+                  }}
+                  className="bg-[#262b34] hover:bg-[#343b47] text-[#88909e] hover:text-white px-2 py-0.5 text-[10px] rounded"
+                >
+                  Cancel
+                </button>
+              </div>
+            )}
+
+            {!state?.youtube_reauth_in_progress && state?.youtube_auth_status === 'EXPIRED' && (
               <div className="p-2.5 bg-red-950/40 border border-red-500/60 text-xs text-red-200 flex flex-wrap items-center justify-between gap-2">
                 <span className="flex items-center gap-1.5 font-bold">
-                  ⚠️ YouTube session expired (7-day Google limit)
+                  ⚠️ Session expired for {state?.youtube_channel || 'account'} (switch accounts above or reconnect)
                 </span>
                 <button
                   type="button"
                   onClick={async () => {
                     try {
                       await fetch('/api/youtube/reauth', { method: 'POST' });
-                      setActionStatus('Opening browser to reconnect YouTube account...');
+                      setActionStatus('Opening browser to reconnect YouTube account (checking every 10s)...');
                     } catch (e) {
                       console.error(e);
                     }
@@ -578,10 +760,75 @@ export default function PreviewPage({ clipId, onBack, onDiscard, state }) {
                 </button>
               </div>
             )}
+
+          {/* Live YouTube Data API Console */}
+          <div className="border border-[#262b34] bg-[#0c0e12] p-3 space-y-2 font-mono rounded">
+            <div className="flex items-center justify-between border-b border-[#262b34] pb-1.5">
+              <div className="flex items-center gap-2">
+                <Terminal className="w-3.5 h-3.5 text-[#ff1e1e]" />
+                <span className="text-[11px] font-bold text-white tracking-wide">
+                  LIVE YOUTUBE DATA API CONSOLE
+                </span>
+                {clip.status === 'UPLOADING' && (
+                  <span className="text-[10px] bg-yellow-500/20 text-yellow-300 px-1.5 py-0.2 rounded animate-pulse">
+                    ACTIVE TRANSMISSION
+                  </span>
+                )}
+                {clip.status === 'UPLOADED' && (
+                  <span className="text-[10px] bg-[#00e676]/20 text-[#00e676] px-1.5 py-0.2 rounded font-bold">
+                    API SUCCESS
+                  </span>
+                )}
+                {clip.status === 'UPLOAD_ERROR' && (
+                  <span className="text-[10px] bg-red-500/20 text-red-400 px-1.5 py-0.2 rounded font-bold">
+                    API FAILED
+                  </span>
+                )}
+              </div>
+              <span className="text-[10px] text-[#88909e]">Google API v3 Telemetry</span>
+            </div>
+
+            {/* Log Terminal Screen */}
+            <div
+              ref={apiLogsContainerRef}
+              className="h-36 overflow-y-auto bg-[#08090c] p-2.5 rounded border border-[#1b1f27] text-[11px] space-y-1 select-text scrollbar-thin"
+            >
+              {displayLogs.length === 0 ? (
+                <div className="text-[#555d6e] italic py-2">
+                  Click APPROVE or UPLOAD NOW below to dispatch this clip. Real-time API authentication, metadata injection, chunk progress, thumbnail sync, and Shorts publication will stream here.
+                </div>
+              ) : (
+                displayLogs.map((log, idx) => {
+                  const isSuccess = log.includes('SUCCESS') || log.includes('✅') || log.includes('🎉') || log.includes('Uploaded successfully');
+                  const isError = log.includes('failed') || log.includes('error') || log.includes('Fatal') || log.includes('❌') || log.includes('⚠️');
+                  const isProgress = log.includes('progress:') || log.includes('sent') || log.includes('MB');
+                  const isMeta = log.includes('Category:') || log.includes('Audience:') || log.includes('License:') || log.includes('Tags:') || log.includes('Configuring');
+
+                  return (
+                    <div
+                      key={idx}
+                      className={`${
+                        isSuccess
+                          ? 'text-[#00e676] font-bold'
+                          : isError
+                          ? 'text-red-400 font-bold'
+                          : isProgress
+                          ? 'text-yellow-300'
+                          : isMeta
+                          ? 'text-cyan-300'
+                          : 'text-[#a6b0c2]'
+                      }`}
+                    >
+                      {log}
+                    </div>
+                  );
+                })
+              )}
+            </div>
           </div>
 
           {/* Action Buttons */}
-          {clip.status === 'PENDING_REVIEW' && (
+          {(clip.status === 'PENDING_REVIEW' || clip.status === 'UPLOAD_ERROR') && (
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-2 border-t border-[#262b34]">
               <button
                 onClick={handleApprove}
@@ -589,7 +836,7 @@ export default function PreviewPage({ clipId, onBack, onDiscard, state }) {
                 title="Approve for scheduled release. Purged from SSD after upload."
               >
                 <Check className="w-4 h-4" />
-                APPROVE
+                {clip.status === 'UPLOAD_ERROR' ? 'SCHEDULE RELEASE' : 'APPROVE'}
               </button>
 
               <button
@@ -597,8 +844,8 @@ export default function PreviewPage({ clipId, onBack, onDiscard, state }) {
                 className="bg-[#ff1e1e] hover:bg-[#d01818] text-white font-bold text-xs py-2.5 flex items-center justify-center gap-1.5 transition-none cursor-pointer"
                 title="Publish directly to YouTube Shorts now. Purged from SSD after upload."
               >
-                <Upload className="w-4 h-4" />
-                UPLOAD NOW
+                {clip.status === 'UPLOAD_ERROR' ? <RefreshCw className="w-4 h-4" /> : <Upload className="w-4 h-4" />}
+                {clip.status === 'UPLOAD_ERROR' ? 'RETRY UPLOAD NOW' : 'UPLOAD NOW'}
               </button>
 
               <button

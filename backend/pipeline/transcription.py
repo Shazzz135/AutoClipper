@@ -121,19 +121,21 @@ class SpeechTranscriber:
                         })
                         last_word_text = clean_upper
 
-        # Strictly group transcript display into rows of max 4 words each
+        # Group transcript display into pause-aware rows matching on-screen subtitles
+        from backend.pipeline.subtitles import subtitles
+        subtitle_chunks = subtitles._chunk_words(words)
         transcript_display: List[Dict[str, Any]] = []
-        for i in range(0, len(words), 4):
-            chunk = words[i:i + 4]
-            chunk_text = " ".join(w["word"] for w in chunk)
-            transcript_display.append({
-                "start": round(chunk[0]["start"], 1),
-                "end": round(chunk[-1]["end"], 1),
-                "text": chunk_text
-            })
+        for chunk in subtitle_chunks:
+            if chunk:
+                chunk_text = " ".join(w["word"] for w in chunk)
+                transcript_display.append({
+                    "start": round(chunk[0]["start"], 1),
+                    "end": round(chunk[-1]["end"], 1),
+                    "text": chunk_text
+                })
 
         state.current_transcript = transcript_display
-        state.add_col3_log(f"Transcribed {len(words)} words ({state.censored_count} words censored in text, max 4 words/row)")
+        state.add_col3_log(f"Transcribed {len(words)} words ({len(transcript_display)} speech segments, pause-synchronized)")
 
         # Snap boundaries to natural pauses centered near peak_offset
         snapped_start, snapped_end = self._calculate_snapped_boundaries(words, peak_offset=peak_offset)
