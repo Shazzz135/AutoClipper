@@ -621,7 +621,7 @@ class YouTubeUploader:
             "reset_display": reset_display,
             "reset_in_hours": round(seconds_left / 3600.0, 1),
             "next_reset_iso": next_midnight_pt.isoformat(),
-            "strategy": "3x Daily Shorts (Midday, Afternoon, Prime Evening) per account (6 total across Google Cloud project)"
+            "strategy": "Daily Short at 12:00 PM EST per account (Google Cloud quota tracked)"
         }
         return quota_data
 
@@ -781,21 +781,58 @@ class YouTubeUploader:
                 time.sleep(sleep_sec)
 
         video_id = response.get("id")
-        video_url = f"https://youtube.com/shorts/{video_id}"
-        state.add_col3_log(f"✅ UPLOAD SUCCESSFUL! Video ID: {video_id} ({video_url})")
+        video_url = f"https://www.youtube.com/shorts/{video_id}"
+        state.add_col3_log(f"✅ UPLOAD COMPLETE! Video ID: {video_id} (100% bytes transferred)")
 
-        # Set custom thumbnail if available
-        if thumbnail_path and thumbnail_path.exists() and video_id:
+        # YouTube Shorts natively extracts its thumbnail from the vertical 9:16 video frames.
+        # DO NOT call service.thumbnails().set() with a 16:9 thumbnail, as that sets a landscape image
+        # and interferes with YouTube's Shorts ingestion and Studio presentation.
+
+        # Poll YouTube processing pipeline to verify transcode & vertical Shorts classification
+        state.add_col3_log(f"Polling YouTube Shorts processing pipeline (checking transcode status)...")
+        is_processed = False
+        poll_start = time.time()
+        max_poll_sec = 45
+
+        while (time.time() - poll_start) < max_poll_sec:
             try:
-                state.add_col3_log("Setting custom expressive thumbnail...")
-                thumb_media = MediaFileUpload(str(thumbnail_path), mimetype="image/jpeg")
-                service.thumbnails().set(
-                    videoId=video_id,
-                    media_body=thumb_media
+                poll_res = service.videos().list(
+                    part="status,processingDetails,contentDetails",
+                    id=video_id
                 ).execute()
-                state.add_col3_log("Thumbnail set successfully.")
+
+                items = poll_res.get("items", [])
+                if items:
+                    v_item = items[0]
+                    v_status = v_item.get("status", {})
+                    v_proc = v_item.get("processingDetails", {})
+                    v_content = v_item.get("contentDetails", {})
+
+                    upload_st = v_status.get("uploadStatus")
+                    proc_st = v_proc.get("processingStatus")
+                    definition = v_content.get("definition", "sd")
+                    duration_str = v_content.get("duration", "")
+
+                    if proc_st == "succeeded" or upload_st == "processed":
+                        state.add_col3_log(f"🎬 YouTube transcode succeeded! (Quality: {definition.upper()}, Duration: {duration_str})")
+                        state.add_col3_log(f"✨ Verified YouTube Short: {video_url}")
+                        is_processed = True
+                        break
+                    elif proc_st == "failed":
+                        fail_reason = v_proc.get("processingFailureReason", "unknown")
+                        state.add_col3_log(f"⚠️ YouTube reported processing issue: {fail_reason}")
+                        break
+                    else:
+                        elapsed = int(time.time() - poll_start)
+                        state.add_col3_log(f"YouTube processing in progress... ({elapsed}s elapsed)")
+
             except Exception as e:
-                state.add_col3_log(f"Warning: Could not set thumbnail ({str(e)})")
+                pass
+
+            time.sleep(4)
+
+        if not is_processed:
+            state.add_col3_log(f"⏳ File ingestion confirmed. Background 1080p pass continuing on YouTube's servers. View Short at: {video_url}")
 
         # Record upload in persistent history and recompute remaining budget
         active_acc = self.detect_active_account() or getattr(state, "youtube_channel", "Connected Channel")

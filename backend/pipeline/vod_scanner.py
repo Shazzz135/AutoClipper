@@ -175,14 +175,14 @@ class TwitchVODScanner:
     def scan_vod_for_peaks(
         self,
         vod_url_or_id: str,
-        max_peaks: int = 10,
-        min_spacing_seconds: int = 300,
+        max_peaks: int = 30,
+        min_spacing_seconds: int = 90,
         progress_cb: Optional[Callable[[int, str], None]] = None
     ) -> Dict[str, Any]:
         """
         Fast-scans VOD chat replay across the entire stream timeline.
-        Computes 10-second chat density buckets, calculates Z-score spikes,
-        enforces anti-collision spacing, and returns ranked top moments.
+        Computes 10-second chat density buckets, calculates velocities (msg/s) and hype density,
+        enforces anti-collision spacing, and returns up to 30 top-ranked moments.
         """
         vod_id = self.parse_vod_id(vod_url_or_id)
         if not vod_id:
@@ -207,7 +207,7 @@ class TwitchVODScanner:
             duration = 14400  # 4h fallback
 
         if progress_cb:
-            progress_cb(15, f"Scanning chat heatmap for {vod_meta['title']} ({vod_meta['duration_display']})...")
+            progress_cb(12, f"Scanning high-res chat heatmap for {vod_meta['title']} ({vod_meta['duration_display']})...")
 
         # Query comments across the VOD length
         # Bucket size: 10 seconds per bucket
@@ -216,9 +216,6 @@ class TwitchVODScanner:
         hype_buckets = [0] * num_buckets
         sample_messages: Dict[int, List[str]] = {}
 
-        # Scan strategy: Sweep across timeline by offset increments
-        # Twitch comments query returns ~50-60 comments per call
-        # Sampling sweep: query at strategic steps (e.g. every 60s to 120s or cursor chain)
         headers = {
             "Client-Id": TWITCH_CLIENT_ID,
             "User-Agent": "Mozilla/5.0",
@@ -241,17 +238,18 @@ class TwitchVODScanner:
         }
         """
 
-        step_sec = 60 if duration <= 7200 else (120 if duration <= 18000 else 180)
+        # High-resolution sampling sweep: sample every 30s-60s so no sudden hype spikes are missed
+        step_sec = 30 if duration <= 7200 else (45 if duration <= 14400 else 60)
         offsets_to_sample = list(range(0, duration, step_sec))
         total_offsets = len(offsets_to_sample)
         total_comments_scanned = 0
 
         for idx, offset_sec in enumerate(offsets_to_sample):
-            pct = 15 + int((idx / max(1, total_offsets)) * 65)
+            pct = 12 + int((idx / max(1, total_offsets)) * 72)
             self.current_scan["progress_pct"] = pct
-            self.current_scan["status_text"] = f"Scanning chat heatmap ({pct}%)..."
-            if progress_cb and idx % 5 == 0:
-                progress_cb(pct, f"Analyzing chat density ({idx}/{total_offsets})...")
+            self.current_scan["status_text"] = f"Analyzing chat speed & hype ({pct}%)..."
+            if progress_cb and idx % 6 == 0:
+                progress_cb(pct, f"Analyzing chat density & hype ({idx}/{total_offsets})...")
 
             try:
                 payload = json.dumps({
@@ -269,7 +267,7 @@ class TwitchVODScanner:
                         if 0 <= b_idx < num_buckets:
                             buckets[b_idx] += 1
                             total_comments_scanned += 1
-                            # Check hype
+                            # Check hype terms
                             frags = node.get("message", {}).get("fragments", [])
                             text = " ".join(f.get("text", "") for f in frags).strip()
                             words = set(re.findall(r'\b\w+\b', text.lower()))
@@ -283,7 +281,7 @@ class TwitchVODScanner:
                 pass
 
         if progress_cb:
-            progress_cb(85, "Ranking peak excitement moments...")
+            progress_cb(88, "Ranking top 30 moments by hype density & msg/s...")
 
         # If zero comments were returned (e.g. chat disabled on VOD), generate strategic peak intervals
         if total_comments_scanned < 20:
@@ -323,7 +321,7 @@ class TwitchVODScanner:
         max_peaks: int,
         min_spacing_seconds: int
     ) -> List[Dict[str, Any]]:
-        """Calculates velocities, Z-scores, ranks top moments, and applies anti-collision filtering."""
+        """Calculates velocities, Z-scores, ranks top moments by hype & msg/s, and applies anti-collision filtering."""
         non_zero = [b for b in buckets if b > 0]
         mean_b = sum(non_zero) / max(1, len(non_zero)) if non_zero else 2.0
         var_b = sum((x - mean_b) ** 2 for x in non_zero) / max(1, len(non_zero)) if non_zero else 1.0
@@ -332,17 +330,20 @@ class TwitchVODScanner:
         candidates = []
         for i in range(1, len(buckets) - 1):
             val = buckets[i]
-            # Must be a local peak and greater than baseline
-            if val >= buckets[i - 1] and val >= buckets[i + 1] and val >= max(3, int(mean_b * 1.4)):
+            # Must be a local peak and exceed baseline
+            if val >= buckets[i - 1] and val >= buckets[i + 1] and val >= max(2, int(mean_b * 1.2)):
                 offset_s = i * 10
                 if offset_s >= duration - 30:
                     continue
 
-                vel = round(val / 10.0, 1)  # msgs per second
+                vel = round(val / 10.0, 1)  # messages per second
                 z_score = round((val - mean_b) / std_b, 2)
                 hype_cnt = hype_buckets[i]
                 hype_pct = int((hype_cnt / max(1, val)) * 100)
-                score = round((z_score * 0.6) + (vel * 0.4) + (0.2 if hype_pct >= 40 else 0.0), 2)
+
+                # Prioritize highest chat velocity (msg/s) and hype density percentage
+                # Moments with massive chat speed and heavy hype emotes rank highest
+                score = round((vel * 0.45) + (hype_cnt * 0.30) + ((hype_pct / 10.0) * 0.20) + (max(0.0, z_score) * 0.05), 2)
 
                 # Format human readable timestamp (e.g. 01:24:10)
                 hh = offset_s // 3600
@@ -354,14 +355,14 @@ class TwitchVODScanner:
                     "offset_seconds": offset_s,
                     "time_display": time_display,
                     "velocity": vel,
-                    "z_score": max(2.5, z_score),
+                    "z_score": max(1.5, z_score),
                     "hype_density": hype_pct,
                     "score": score,
                     "samples": sample_messages.get(i, [])
                 })
 
-        # Sort all candidates by composite score descending
-        candidates.sort(key=lambda c: c["score"], reverse=True)
+        # Sort all candidates strictly by composite score (highest msg/s + hype density) descending
+        candidates.sort(key=lambda c: (c["score"], c["velocity"], c["hype_density"]), reverse=True)
 
         # Apply anti-collision filter (minimum min_spacing_seconds between peaks)
         filtered_peaks = []
@@ -378,18 +379,18 @@ class TwitchVODScanner:
         for idx, p in enumerate(filtered_peaks, 1):
             p["rank"] = idx
             p["peak_id"] = f"VOD_Peak_#{idx}_{p['time_display'].replace(':', '')}"
-            p["loudness_db"] = -14.0 + min(6.0, p["score"])  # estimated energy
-            p["intensity"] = "HIGH" if p["score"] >= 4.0 else "NORMAL"
+            p["loudness_db"] = -14.0 + min(6.0, p["score"] * 0.2)
+            p["intensity"] = "HIGH" if p["score"] >= 8.0 or p["velocity"] >= 15.0 else "NORMAL"
             ranked_peaks.append(p)
 
         return ranked_peaks
 
     def _generate_fallback_peaks(self, duration: int, max_peaks: int) -> List[Dict[str, Any]]:
-        """Generates well-spaced strategic peaks when chat replay is unavailable."""
-        intervals = [0.15, 0.30, 0.45, 0.60, 0.75, 0.88]
+        """Generates up to 30 well-spaced strategic peaks across timeline when chat replay is unavailable."""
         peaks = []
-        for idx, factor in enumerate(intervals[:max_peaks], 1):
-            offset_s = int(duration * factor)
+        step = duration / (max_peaks + 1)
+        for idx in range(1, max_peaks + 1):
+            offset_s = int(step * idx)
             hh = offset_s // 3600
             mm = (offset_s % 3600) // 60
             ss = offset_s % 60
@@ -399,15 +400,29 @@ class TwitchVODScanner:
                 "peak_id": f"VOD_Moment_#{idx}_{time_display.replace(':', '')}",
                 "offset_seconds": offset_s,
                 "time_display": time_display,
-                "velocity": round(15.0 + (idx * 2.5), 1),
-                "z_score": round(3.2 + (idx * 0.3), 2),
-                "hype_density": 65,
-                "score": round(3.5 + idx * 0.4, 2),
+                "velocity": round(15.0 + ((idx % 7) * 2.5), 1),
+                "z_score": round(3.2 + ((idx % 5) * 0.3), 2),
+                "hype_density": 65 + ((idx % 4) * 5),
+                "score": round(8.5 + (idx % 6) * 0.4, 2),
                 "loudness_db": -12.5,
                 "intensity": "HIGH",
                 "samples": ["Stream highlight milestone moment"]
             })
         return peaks
+
+    def remove_peak(self, peak_id: str) -> bool:
+        """Removes a peak by peak_id from current_scan peaks list and updates ranks."""
+        if not self.current_scan or not self.current_scan.get("peaks"):
+            return False
+        initial_len = len(self.current_scan["peaks"])
+        self.current_scan["peaks"] = [
+            p for p in self.current_scan["peaks"]
+            if p.get("peak_id") != peak_id
+        ]
+        # Re-number remaining ranks 1..N
+        for idx, p in enumerate(self.current_scan["peaks"], 1):
+            p["rank"] = idx
+        return len(self.current_scan["peaks"]) < initial_len
 
     def extract_vod_segment(
         self,

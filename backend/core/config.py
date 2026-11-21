@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     # YouTube OAuth
     YOUTUBE_CLIENT_SECRETS_PATH: str = "config/client_secrets.json"
     YOUTUBE_TOKEN_PATH: str = "config/token.json"
-    YOUTUBE_SCHEDULE_SLOTS: str = "12:00,15:30,19:00"
+    YOUTUBE_SCHEDULE_SLOTS: str = "12:00"
     YOUTUBE_TIMEZONE: str = "America/New_York"
     YOUTUBE_DEFAULT_PRIVACY: str = "scheduled"
     REQUIRE_MANUAL_APPROVAL: bool = True

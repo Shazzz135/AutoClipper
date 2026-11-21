@@ -30,7 +30,9 @@ class VideoComposer:
         """
         state.col3_status = "RENDERING"
         t0 = time.time()
-        duration = min(max_duration, max(3.0, end_time - start_time))
+        # YouTube Shorts requires strict <60s duration. We clamp to 58.0s to ensure
+        # that even with container packet rounding and audio sync, duration NEVER reaches or exceeds 60.00s.
+        duration = min(58.0, max(3.0, end_time - start_time))
         state.add_col3_log(f"Starting YouTube-compliant FFmpeg render (duration: {duration:.1f}s, output: 1080x1920 60fps CFR)...")
 
         # Compose full filtergraph including subtitle burning
@@ -67,7 +69,9 @@ class VideoComposer:
             "-ar", "48000",
             "-ac", "2",
             "-af", "aresample=async=1000:first_pts=0",
+            "-shortest",
             "-movflags", "+faststart",
+            "-f", "mp4",
             str(output_mp4_path)
         ]
 
