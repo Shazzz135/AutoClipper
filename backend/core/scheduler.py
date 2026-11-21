@@ -3,28 +3,21 @@ import pytz
 from typing import List, Optional, Dict, Any
 from backend.core.config import settings
 
-# Daily 3-Slot Optimal Posting Windows for YouTube Shorts (America/New_York / EST)
-# Structured according to industry benchmarks for maximum engagement and 3x daily distribution:
-# - Slot 1 (Midday / Lunch): 12:00 PM EST (11:30 AM weekends) - US Lunch Scroll + Western Europe Evening Peak
-# - Slot 2 (After-School / Commute): 3:30 PM EST (3:00 PM weekends) - Afternoon commute & after-school scroll
-# - Slot 3 (Prime Evening Peak): 7:00 PM EST (6:30 PM weekends) - Nationwide peak leisure & gaming hours ⭐
+# Daily 1-Slot Optimal Posting Window for YouTube Shorts (America/New_York / EST)
+# Structured for once-a-day release strictly at 12:00 PM EST:
+# - 12:00 PM EST (Midday Peak): Optimal global crossover window capturing US Lunch Scroll + Western Europe Evening Peak
 
-WEEKDAY_SLOTS = [
-    {"hour": 12, "minute": 0, "window": "12:00 PM – 1:00 PM", "description": "Midday Lunch Scroll (US + EU Peak)"},
-    {"hour": 15, "minute": 30, "window": "3:30 PM – 4:30 PM", "description": "After-School & Commute Window"},
-    {"hour": 19, "minute": 0, "window": "6:30 PM – 8:30 PM", "description": "Prime Evening Gaming Peak ⭐"}
+DAILY_SLOTS = [
+    {"hour": 12, "minute": 0, "window": "12:00 PM – 1:00 PM", "description": "Daily Peak Release (12:00 PM EST)"}
 ]
 
-WEEKEND_SLOTS = [
-    {"hour": 11, "minute": 30, "window": "11:00 AM – 1:00 PM", "description": "Weekend Morning Scroll"},
-    {"hour": 15, "minute": 0, "window": "2:30 PM – 4:30 PM", "description": "Weekend Afternoon Leisure"},
-    {"hour": 18, "minute": 30, "window": "6:00 PM – 8:00 PM", "description": "Weekend Prime Evening ⭐"}
-]
+WEEKDAY_SLOTS = DAILY_SLOTS
+WEEKEND_SLOTS = DAILY_SLOTS
 
 DAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 
 def get_slots_for_weekday(weekday: int) -> List[Dict[str, Any]]:
-    return WEEKEND_SLOTS if weekday in (5, 6) else WEEKDAY_SLOTS
+    return DAILY_SLOTS
 
 class PostingScheduler:
     def __init__(self):
@@ -69,11 +62,11 @@ class PostingScheduler:
 
     def get_next_available_slot(self, occupied_slots: Optional[List[datetime]] = None) -> datetime:
         """
-        Finds the next optimal posting slot among the 3 daily peak windows.
-        Picks the earliest upcoming slot that:
+        Finds the next optimal posting slot at 12:00 PM EST once a day.
+        Picks the earliest upcoming 12:00 PM slot that:
         1. Is at least 15 minutes in the future (YouTube API publishAt constraint).
-        2. Has no other scheduled video within 2.5 hours (prevents algorithmic cannibalization).
-        If today's 3 slots are taken, automatically rolls over to the next day's Slot 1.
+        2. Has no other scheduled video on that day (anti-collision).
+        If today's 12:00 PM slot is already occupied or past, automatically rolls over to tomorrow at 12:00 PM.
         """
         now = datetime.now(self.timezone)
         all_occupied = self.get_all_occupied_slots(occupied_slots)
@@ -90,7 +83,7 @@ class PostingScheduler:
             except Exception:
                 pass
 
-        # Check up to 30 days into the future for the first free slot among the 3 daily windows
+        # Check up to 30 days into the future for the first free 12:00 PM slot
         for day_offset in range(30):
             target_date = (now + timedelta(days=day_offset)).date()
             weekday = target_date.weekday()
@@ -106,8 +99,8 @@ class PostingScheduler:
                 if slot_dt <= now + timedelta(minutes=15):
                     continue
 
-                # Rule 2: Anti-collision: No other upload within 2.5 hours (9,000 seconds)
-                has_collision = any(abs((slot_dt - occ).total_seconds()) < 9000 for occ in occupied_local)
+                # Rule 2: Anti-collision: No other upload within 8 hours (same day at 12:00 PM)
+                has_collision = any(abs((slot_dt - occ).total_seconds()) < 28800 for occ in occupied_local)
                 if has_collision:
                     continue
 
@@ -174,7 +167,7 @@ class PostingScheduler:
                 )
 
                 is_past = slot_time <= now + timedelta(minutes=15)
-                matched_occ = next((occ for occ in occupied_local if abs((slot_time - occ).total_seconds()) < 7200), None)
+                matched_occ = next((occ for occ in occupied_local if abs((slot_time - occ).total_seconds()) < 28800), None)
 
                 status = "FREE"
                 if matched_occ:

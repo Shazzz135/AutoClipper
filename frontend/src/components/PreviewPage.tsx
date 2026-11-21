@@ -166,8 +166,7 @@ export default function PreviewPage({ clipId, onBack, onDiscard, state }) {
         }
         setClip(data);
         if (data.status === 'UPLOADED') {
-          setActionStatus(`✓ Published to YouTube: ${data.youtube_url || ''} (Storage reclaimed)`);
-          if (onDiscard) onDiscard();
+          setActionStatus(`✓ Published to YouTube Shorts: ${data.youtube_url || ''}`);
         }
         if (!isDirtyRef.current) {
           setTitle(data.title || '');
@@ -261,20 +260,18 @@ export default function PreviewPage({ clipId, onBack, onDiscard, state }) {
     if (isDirtyRef.current) {
       await handleSaveMetadata();
     }
-    setActionStatus('✓ Approved clip for scheduled YouTube upload. Storage reclaimed once posted.');
+    setActionStatus('✓ Approved clip for scheduled release. Initiating YouTube Shorts upload & verification...');
     await fetch(`/api/clips/${clipId}/approve`, { method: 'POST' });
     setClip((prev) => prev ? { ...prev, status: 'APPROVED' } : prev);
-    if (onDiscard) onDiscard();
   };
 
   const handleUploadNow = async () => {
     if (isDirtyRef.current) {
       await handleSaveMetadata();
     }
-    setActionStatus('Uploading directly to YouTube Shorts. Storage reclaimed once posted...');
+    setActionStatus('Uploading directly to YouTube Shorts. Transcode & verification in progress...');
     await fetch(`/api/clips/${clipId}/upload_now`, { method: 'POST' });
     setClip((prev) => prev ? { ...prev, status: 'UPLOADING' } : prev);
-    if (onDiscard) onDiscard();
   };
 
   const handleReject = async () => {
@@ -826,6 +823,48 @@ export default function PreviewPage({ clipId, onBack, onDiscard, state }) {
               )}
             </div>
           </div>
+
+          {/* In-Flight Upload Status */}
+          {(clip.status === 'UPLOADING' || clip.status === 'APPROVED') && (
+            <div className="p-3 bg-cyan-950/40 border border-cyan-500/50 rounded flex items-center justify-between gap-2 text-xs text-cyan-200">
+              <span className="flex items-center gap-2 font-bold animate-pulse">
+                <RefreshCw className="w-4 h-4 animate-spin text-cyan-400" />
+                {clip.status === 'UPLOADING' ? 'Uploading directly to YouTube Shorts & verifying transcode...' : 'Approved. Scheduling release & uploading...'}
+              </span>
+              <span className="text-[10px] text-cyan-400 font-mono">Telemetry streaming below ↓</span>
+            </div>
+          )}
+
+          {/* Upload Complete Card with Direct Link */}
+          {clip.status === 'UPLOADED' && (
+            <div className="p-3.5 bg-[#00e676]/10 border border-[#00e676]/50 rounded flex flex-col sm:flex-row items-center justify-between gap-3 pt-2 border-t border-[#262b34]">
+              <div className="flex items-center gap-2.5 text-[#00e676]">
+                <CheckCircle2 className="w-5 h-5 text-[#00e676] shrink-0" />
+                <div>
+                  <div className="font-bold text-xs uppercase tracking-wider">Published to YouTube Shorts</div>
+                  <div className="text-[11px] text-[#88909e]">Verified 9:16 vertical Short • Transcode complete</div>
+                </div>
+              </div>
+              <div className="flex items-center gap-2 w-full sm:w-auto">
+                {clip.youtube_url && (
+                  <a
+                    href={clip.youtube_url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="flex-1 sm:flex-initial bg-[#00e676] hover:bg-[#00c853] text-black font-bold text-xs px-4 py-2 rounded flex items-center justify-center gap-1.5 transition-none cursor-pointer"
+                  >
+                    VIEW SHORT <ExternalLink className="w-3.5 h-3.5" />
+                  </a>
+                )}
+                <button
+                  onClick={onBack}
+                  className="bg-[#262b34] hover:bg-[#323844] text-white text-xs px-3.5 py-2 rounded font-mono cursor-pointer"
+                >
+                  STUDIO
+                </button>
+              </div>
+            </div>
+          )}
 
           {/* Action Buttons */}
           {(clip.status === 'PENDING_REVIEW' || clip.status === 'UPLOAD_ERROR') && (

@@ -97,7 +97,7 @@ export default function Column1Peak({ data, activeClipId, state }) {
       const res = await fetch('/api/vod/scan', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ vod_url: vodUrlInput.trim() })
+        body: JSON.stringify({ vod_url: vodUrlInput.trim(), max_peaks: 30 })
       });
       if (!res.ok) {
         const err = await res.json();
@@ -133,11 +133,47 @@ export default function Column1Peak({ data, activeClipId, state }) {
           errMsg = await res.text();
         }
         alert(errMsg);
+      } else {
+        // Once processing starts, immediately remove peak from VOD list
+        setVodScanData(prev => {
+          if (!prev || !prev.peaks) return prev;
+          const newPeaks = prev.peaks
+            .filter(p => p.peak_id !== peak.peak_id)
+            .map((p, idx) => ({ ...p, rank: idx + 1 }));
+          return { ...prev, peaks: newPeaks };
+        });
       }
     } catch (err) {
       console.error('Process VOD peak error:', err);
     } finally {
       setProcessingVodPeakId(null);
+    }
+  };
+
+  const handleDeleteVodPeak = async (e, peakId) => {
+    if (e) e.stopPropagation();
+    setVodScanData(prev => {
+      if (!prev || !prev.peaks) return prev;
+      const newPeaks = prev.peaks
+        .filter(p => p.peak_id !== peakId)
+        .map((p, idx) => ({ ...p, rank: idx + 1 }));
+      return { ...prev, peaks: newPeaks };
+    });
+    try {
+      await fetch(`/api/vod/peaks/${peakId}`, { method: 'DELETE' });
+    } catch (err) {
+      console.error('Failed to delete VOD peak:', err);
+    }
+  };
+
+  const handleClearAllVodPeaks = async () => {
+    if (window.confirm('Clear all discovered VOD moments?')) {
+      setVodScanData(prev => prev ? { ...prev, peaks: [] } : prev);
+      try {
+        await fetch('/api/vod/peaks/clear', { method: 'POST' });
+      } catch (err) {
+        console.error('Failed to clear VOD peaks:', err);
+      }
     }
   };
 
@@ -737,9 +773,21 @@ export default function Column1Peak({ data, activeClipId, state }) {
               <div className="text-[10px] font-bold text-[#88909e] uppercase mb-2 flex items-center justify-between">
                 <span className="flex items-center gap-1 text-white">
                   <Flame className="w-3.5 h-3.5 text-[#ff1e1e]" />
-                  TOP MOMENTS ({vodScanData?.peaks?.length || 0}) — 1 AT A TIME
+                  TOP MOMENTS ({vodScanData?.peaks?.length || 0}/30) — 1 AT A TIME
                 </span>
-                <span className="text-[9px] text-[#88909e]">RANKED BY HYPE</span>
+                <div className="flex items-center gap-2">
+                  <span className="text-[9px] text-[#88909e]">RANKED BY HYPE & VELOCITY</span>
+                  {vodScanData?.peaks && vodScanData.peaks.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={handleClearAllVodPeaks}
+                      title="Clear all discovered moments"
+                      className="text-[9px] text-[#88909e] hover:text-red-400 cursor-pointer underline flex items-center gap-0.5"
+                    >
+                      <Trash2 className="w-2.5 h-2.5" /> Clear All
+                    </button>
+                  )}
+                </div>
               </div>
 
               <div className="max-h-96 overflow-y-auto text-[11px] font-mono space-y-2 bg-[#0d0f12] p-2 border border-[#262b34]">
@@ -748,7 +796,7 @@ export default function Column1Peak({ data, activeClipId, state }) {
                     <Film className="w-6 h-6 mx-auto text-[#88909e]/60" />
                     <div className="text-xs text-white font-bold">No VOD scanned yet</div>
                     <div className="text-[10px] text-[#88909e] max-w-xs mx-auto">
-                      Paste a Twitch VOD link above and click <strong>SCAN VOD</strong>. Top excitement moments across the entire stream will be discovered and queued here for one-by-one processing.
+                      Paste a Twitch VOD link above and click <strong>SCAN VOD</strong>. Up to 30 top excitement moments with the highest hype and message speed will be discovered and queued here for one-by-one processing.
                     </div>
                   </div>
                 ) : (
@@ -781,32 +829,43 @@ export default function Column1Peak({ data, activeClipId, state }) {
                             )}
                           </div>
 
-                          <button
-                            type="button"
-                            onClick={() => handleProcessVodPeak(p)}
-                            disabled={isProcessing || Boolean(activeClipId)}
-                            title={
-                              state?.is_processing
-                                ? 'A clip is currently rendering. Only 1 clip at a time permitted.'
-                                : activeClipId
-                                ? 'Only 1 clip at a time. Review or discard current clip first.'
-                                : isProcessing
-                                ? 'Extracting & rendering this moment...'
-                                : 'Process this peak clip'
-                            }
-                            className={`px-3 py-1 text-[10px] font-bold font-mono uppercase flex items-center gap-1 shrink-0 cursor-pointer ${
-                              isProcessing || activeClipId
-                                ? 'bg-[#262b34] text-[#88909e] cursor-not-allowed'
-                                : 'bg-[#ff1e1e] hover:bg-[#d01818] text-white'
-                            }`}
-                          >
-                            <Play className="w-2.5 h-2.5" />
-                            {processingVodPeakId === p.peak_id
-                              ? 'SLICING...'
-                              : (activeClipId || state?.is_processing)
-                              ? '1 AT A TIME'
-                              : 'PROCESS CLIP'}
-                          </button>
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            <button
+                              type="button"
+                              onClick={(e) => handleDeleteVodPeak(e, p.peak_id)}
+                              title="Discard / remove this peak"
+                              className="p-1 hover:bg-red-950/60 text-[#88909e] hover:text-red-400 rounded transition-none cursor-pointer"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() => handleProcessVodPeak(p)}
+                              disabled={isProcessing || Boolean(activeClipId)}
+                              title={
+                                state?.is_processing
+                                  ? 'A clip is currently rendering. Only 1 clip at a time permitted.'
+                                  : activeClipId
+                                  ? 'Only 1 clip at a time. Review or discard current clip first.'
+                                  : isProcessing
+                                  ? 'Extracting & rendering this moment...'
+                                  : 'Process this peak clip'
+                              }
+                              className={`px-3 py-1 text-[10px] font-bold font-mono uppercase flex items-center gap-1 shrink-0 cursor-pointer ${
+                                isProcessing || activeClipId
+                                  ? 'bg-[#262b34] text-[#88909e] cursor-not-allowed'
+                                  : 'bg-[#ff1e1e] hover:bg-[#d01818] text-white'
+                              }`}
+                            >
+                              <Play className="w-2.5 h-2.5" />
+                              {processingVodPeakId === p.peak_id
+                                ? 'SLICING...'
+                                : (activeClipId || state?.is_processing)
+                                ? '1 AT A TIME'
+                                : 'PROCESS CLIP'}
+                            </button>
+                          </div>
                         </div>
 
                         {/* Chat sample quotes from this exact peak moment */}

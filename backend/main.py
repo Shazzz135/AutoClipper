@@ -185,7 +185,7 @@ async def get_status():
 async def get_schedule_preview():
     return {
         "timezone": settings.YOUTUBE_TIMEZONE,
-        "strategy": "3 posts per day in peak engagement windows (Midday, Afternoon, Prime Evening)",
+        "strategy": "Once a day at 12:00 PM EST (Peak Midday Scroll)",
         "calendar": scheduler.get_upcoming_schedule_preview(days=7)
     }
 
@@ -505,6 +505,8 @@ async def start_vod_scan(payload: dict):
     if not vod_id:
         raise HTTPException(status_code=400, detail="Could not parse a valid Twitch VOD ID from URL")
 
+    max_peaks = int(payload.get("max_peaks", 30))
+
     # Run scanner in background thread so API doesn't block
     def _run_scan():
         def _prog_cb(pct, text):
@@ -516,7 +518,8 @@ async def start_vod_scan(payload: dict):
             except Exception:
                 pass
 
-        res = vod_scanner.scan_vod_for_peaks(vod_url, max_peaks=10, min_spacing_seconds=300, progress_cb=_prog_cb)
+        # High-resolution chat scan yielding up to 30 top moments (90s anti-collision spacing)
+        res = vod_scanner.scan_vod_for_peaks(vod_url, max_peaks=max_peaks, min_spacing_seconds=90, progress_cb=_prog_cb)
         if res.get("status") == "SUCCESS":
             meta = res.get("vod_info", {})
             state.add_col1_log(f"✓ VOD Scan Complete: Discovered {len(res.get('peaks', []))} top moments for '{meta.get('title')}'")
@@ -524,7 +527,7 @@ async def start_vod_scan(payload: dict):
             state.add_col1_log(f"⚠️ VOD Scan Failed: {res.get('error')}")
 
     asyncio.create_task(asyncio.to_thread(_run_scan))
-    return {"status": "SCAN_STARTED", "vod_id": vod_id}
+    return {"status": "SCAN_STARTED", "vod_id": vod_id, "max_peaks": max_peaks}
 
 @app.post("/api/vod/process_peak")
 async def process_vod_peak(payload: dict):
@@ -537,10 +540,11 @@ async def process_vod_peak(payload: dict):
         if not vod_url or not peak:
             raise HTTPException(status_code=400, detail="Missing vod_url or peak details")
 
+        peak_id = peak.get("peak_id", f"VOD_Peak_{int(time.time())}")
         peak_info = {
             "is_vod": True,
             "vod_url": vod_url,
-            "peak_id": peak.get("peak_id", f"VOD_Peak_{int(time.time())}"),
+            "peak_id": peak_id,
             "offset_seconds": float(peak.get("offset_seconds", 0.0)),
             "time_display": peak.get("time_display", "00:00:00"),
             "velocity": float(peak.get("velocity", 20.0)),
@@ -550,15 +554,37 @@ async def process_vod_peak(payload: dict):
             "status": "PROCESSING"
         }
 
+        # Remove the peak from the VOD queue so it doesn't remain once processing begins
+        vod_scanner.remove_peak(peak_id)
+
         state.add_col1_log(f"Initiating processing for VOD Peak #{peak.get('rank', 1)} at {peak.get('time_display')}...")
         asyncio.create_task(orchestrator.process_peak_event(peak_info))
-        await manager.broadcast(state.to_dict())
-        return {"status": "PROCESSING_STARTED", "peak_id": peak_info["peak_id"]}
+        await manager.broadcast({"vod_scan": vod_scanner.current_scan, **state.to_dict()})
+        return {"status": "PROCESSING_STARTED", "peak_id": peak_id}
     except HTTPException:
         raise
     except Exception as e:
         state.add_col1_log(f"Error starting VOD peak processing: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/vod/peaks/{peak_id}")
+@app.post("/api/vod/peaks/{peak_id}/delete")
+async def delete_vod_peak(peak_id: str):
+    removed = vod_scanner.remove_peak(peak_id)
+    if removed:
+        state.add_col1_log(f"VOD peak {peak_id} dismissed from queue.")
+        await manager.broadcast({"vod_scan": vod_scanner.current_scan, **state.to_dict()})
+        return {"status": "DELETED", "peak_id": peak_id}
+    return {"status": "NOT_FOUND", "peak_id": peak_id}
+
+@app.delete("/api/vod/peaks")
+@app.post("/api/vod/peaks/clear")
+async def clear_all_vod_peaks():
+    count = len(vod_scanner.current_scan.get("peaks", []))
+    vod_scanner.current_scan["peaks"] = []
+    state.add_col1_log(f"Cleared all {count} VOD moments from queue.")
+    await manager.broadcast({"vod_scan": vod_scanner.current_scan, **state.to_dict()})
+    return {"status": "CLEARED", "count": count}
 
 @app.post("/api/vod/clear")
 async def clear_vod_scan():
@@ -571,7 +597,7 @@ async def clear_vod_scan():
         "error": None
     }
     state.add_col1_log("Cleared VOD scan session.")
-    await manager.broadcast(state.to_dict())
+    await manager.broadcast({"vod_scan": vod_scanner.current_scan, **state.to_dict()})
     return {"status": "CLEARED"}
 
 @app.get("/api/clips")
@@ -704,11 +730,19 @@ async def retrim_clip_endpoint(clip_id: str, payload: dict):
 @app.post("/api/clips/{clip_id}/reject")
 @app.delete("/api/clips/{clip_id}")
 async def reject_clip(clip_id: str):
+    clip = state.clips.get(clip_id)
+    if clip:
+        peak_info = clip.get("peak_info") or {}
+        p_id = peak_info.get("peak_id")
+        if p_id:
+            state.remove_peak(p_id)
+            if peak_info.get("is_vod") or peak_info.get("vod_url"):
+                vod_scanner.remove_peak(p_id)
     orchestrator.reject_clip(clip_id)
     state.active_clip_id = None
     state.is_processing = False
     state.reset_columns_2_and_3()
-    await manager.broadcast(state.to_dict())
+    await manager.broadcast({"vod_scan": vod_scanner.current_scan, **state.to_dict()})
     return {"status": "REJECTED", "clip_id": clip_id}
 
 @app.post("/api/clips/{clip_id}/dismiss")

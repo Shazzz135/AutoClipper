@@ -197,6 +197,12 @@ class ClipOrchestrator:
                     state.active_clip_id = clip_id
                     if peak_id:
                         state.remove_peak(peak_id)
+                        if is_vod:
+                            from backend.pipeline.vod_scanner import vod_scanner
+                            vod_scanner.remove_peak(peak_id)
+                        if is_vod:
+                            from backend.pipeline.vod_scanner import vod_scanner
+                            vod_scanner.remove_peak(peak_id)
                         state.add_col1_log(f"Peak {peak_id} loaded into 16:9 Studio with auto-generated title: \"{initial_meta['title']}\"")
                 else:
                     # AUTO-PROCESS ON (or AUTO-UPLOAD ON):
@@ -232,6 +238,9 @@ class ClipOrchestrator:
                     state.active_clip_id = clip_id
                     if peak_id:
                         state.remove_peak(peak_id)
+                        if is_vod:
+                            from backend.pipeline.vod_scanner import vod_scanner
+                            vod_scanner.remove_peak(peak_id)
 
                     await self.create_clip_from_studio(
                         clip_id=clip_id,
@@ -352,7 +361,7 @@ class ClipOrchestrator:
             safe_start,
             safe_end,
             final_mp4_path,
-            60.0
+            58.0
         )
 
         if not render_ok or not final_mp4_path.exists():
@@ -416,8 +425,8 @@ class ClipOrchestrator:
         if custom_title:
             clip["title"] = custom_title.strip()
 
-        # Strictly enforce YouTube Shorts duration: max 60.0s, min 3.0s
-        duration = min(60.0, max(3.0, new_end - new_start))
+        # Strictly enforce YouTube Shorts duration: max 58.0s (under 60s hard ceiling), min 3.0s
+        duration = min(58.0, max(3.0, new_end - new_start))
         safe_start = round(new_start, 2)
         safe_end = round(new_start + duration, 2)
 
@@ -579,6 +588,16 @@ class ClipOrchestrator:
         clip_name = clip.get("date_short") or clip.get("name") or clip_id if clip else clip_id
         raw_path = Path(clip["raw_segment_path"]) if clip and clip.get("raw_segment_path") else None
         
+        # When discarded/rejected, permanently remove and delete the originating peak so it never clutters the queue
+        if clip:
+            peak_info = clip.get("peak_info") or {}
+            p_id = peak_info.get("peak_id")
+            if p_id:
+                state.remove_peak(p_id)
+                if peak_info.get("is_vod") or peak_info.get("vod_url"):
+                    from backend.pipeline.vod_scanner import vod_scanner
+                    vod_scanner.remove_peak(p_id)
+
         # Always purge all disk artifacts
         composer.purge_clip_artifacts(clip_id, raw_segment_path=raw_path)
         
